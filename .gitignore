@@ -7,3 +7,9 @@ __pycache__/
 
 # CModule build artifacts
 /tmp/cmodule_build/
+
+# Packaging artifacts
+*.egg-info/
+dist/
+build/
+*.egg
