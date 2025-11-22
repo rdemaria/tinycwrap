@@ -31,3 +31,22 @@ def test_scale_explicit_output(cm):
     scaled_explicit = cm.scale(x, 2.0, len_x=len(x), out_x=out)
     np.testing.assert_allclose(out, x * 2.0)
     np.testing.assert_allclose(scaled_explicit, x * 2.0)
+
+
+def test_struct_wrapper(cm):
+    cp = cm.ComplexPair(real=1.5, imag=-2.5)
+    assert repr(cp) == "ComplexPair(real=1.5, imag=-2.5)"
+    assert cp.real == 1.5
+    assert cp.imag == -2.5
+    cp.real = 3.0
+    cp.imag = 4.0
+    assert cp.real == 3.0
+    assert cp.imag == 4.0
+    np.testing.assert_equal(cp.dtype.fields.keys(), {"real", "imag"})
+    assert cp.dtype["real"] == np.dtype(np.float64)
+
+
+def test_struct_argument(cm):
+    cp = cm.ComplexPair(real=3.0, imag=4.0)
+    mag_sq = cm.complex_magnitude(cp)
+    assert mag_sq == 5.0

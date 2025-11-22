@@ -1,4 +1,5 @@
 #include <stddef.h>
+#include <math.h>
 
 double dot(const double *restrict x, const double *restrict y, int len_x)
 /* Return dot product between x and y */
@@ -22,4 +23,15 @@ void cross(const double *restrict a, const double *restrict b, double *restrict 
     out[0] = a[1] * b[2] - a[2] * b[1];
     out[1] = a[2] * b[0] - a[0] * b[2];
     out[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+typedef struct {
+    double real;
+    double imag;
+} ComplexPair;
+
+double complex_magnitude(const ComplexPair *z)
+/* Return sqrt(re^2 + im^2) */
+{
+    return sqrt(z->real * z->real + z->imag * z->imag);
 }

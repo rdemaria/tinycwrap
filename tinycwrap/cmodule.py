@@ -70,6 +70,21 @@ class FuncSpec:
     doc: str | None = None
 
 
+@dataclass
+class StructField:
+    name: str
+    raw_ctype: str
+    base_type: str
+    is_pointer: bool
+    is_const: bool
+
+
+@dataclass
+class StructSpec:
+    name: str
+    fields: list[StructField]
+
+
 # ---------------- main class ----------------------------------------------
 
 
@@ -140,6 +155,9 @@ class CModule:
 
         # will be filled after parsing
         self._func_specs: dict[str, FuncSpec] = {}
+        self._struct_specs: dict[str, StructSpec] = {}
+        self._struct_dtypes: dict[str, np.dtype] = {}
+        self._struct_classes: dict[str, type] = {}
         self._ipython_hook = None
 
         # always generate cdef from C file
@@ -205,7 +223,9 @@ class CModule:
 
         # Re-parse cdef and attach docs from C source, then create wrappers
         self._func_specs = self._parse_cdef(self._cdef)
+        self._struct_specs = self._parse_structs_from_cdef(self._cdef)
         self._attach_docs_from_source()
+        self._create_struct_classes()
         self._create_wrappers()
 
     def _ensure_compiled(self):
@@ -291,6 +311,15 @@ class CModule:
         )
 
         prototypes = []
+        struct_defs = []
+
+        struct_re = re.compile(
+            r"typedef\s+struct\s*{(?P<body>[^}]*)}\s*(?P<name>\w+)\s*;",
+            re.DOTALL,
+        )
+        for m in struct_re.finditer(src_wo_pp):
+            struct_text = m.group(0)
+            struct_defs.append(struct_text.strip())
 
         for m in func_def_re.finditer(src_wo_pp):
             if m.group("prefix") and "static" in m.group("prefix"):
@@ -302,10 +331,15 @@ class CModule:
             proto = f"{ret} {name}({args});"
             prototypes.append(proto)
 
-        if not prototypes:
+        if not prototypes and not struct_defs:
             raise RuntimeError(f"No functions found in {self._c_path} to generate cdef")
 
-        cdef = "\n".join(prototypes)
+        cdef_parts = []
+        if struct_defs:
+            cdef_parts.extend(struct_defs)
+        if prototypes:
+            cdef_parts.extend(prototypes)
+        cdef = "\n".join(cdef_parts)
         print("[CModule] Auto-generated cdef:\n" + cdef)
         return cdef
 
@@ -316,6 +350,9 @@ class CModule:
         text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
         text = re.sub(r"//.*?$", "", text, flags=re.MULTILINE)
         text = _strip_restrict_keywords(text)
+
+        # remove struct definitions for function parsing
+        text = re.sub(r"typedef\s+struct\s*{[^}]*}\s*\w+\s*;", "", text, flags=re.DOTALL)
 
         decls = []
         buff = []
@@ -399,6 +436,45 @@ class CModule:
 
         return funcs
 
+    def _parse_structs_from_cdef(self, cdef: str) -> dict[str, StructSpec]:
+        structs: dict[str, StructSpec] = {}
+        text = _strip_restrict_keywords(cdef)
+        struct_re = re.compile(r"typedef\s+struct\s*{(?P<body>[^}]*)}\s*(?P<name>\w+)\s*;", re.DOTALL)
+        for m in struct_re.finditer(text):
+            body = m.group("body")
+            name = m.group("name")
+            fields: list[StructField] = []
+            for line in body.split(";"):
+                line = line.strip()
+                if not line:
+                    continue
+                # handle possible trailing comments
+                line = re.sub(r"/\*.*?\*/", "", line).strip()
+                m_field = re.match(r"(.+?)\s+([A-Za-z_]\w*)$", line)
+                if not m_field:
+                    continue
+                raw_ctype = m_field.group(1).strip()
+                fname = m_field.group(2)
+                is_pointer = "*" in raw_ctype
+                is_const = "const" in raw_ctype
+                base = _base_type_from_ctype(raw_ctype)
+                try:
+                    _numpy_dtype_for_base_type(base)
+                except TypeError:
+                    continue
+                fields.append(
+                    StructField(
+                        name=fname,
+                        raw_ctype=raw_ctype,
+                        base_type=base,
+                        is_pointer=is_pointer,
+                        is_const=is_const,
+                    )
+                )
+            if fields:
+                structs[name] = StructSpec(name=name, fields=fields)
+        return structs
+
     # ---------- 3) attach docstrings from C comments ------------------------
 
     def _attach_docs_from_source(self):
@@ -431,8 +507,59 @@ class CModule:
                 continue
             setattr(self, fname, wrapper)
 
+    def _create_struct_classes(self):
+        for sname, sspec in self._struct_specs.items():
+            try:
+                dtype_fields = []
+                for f in sspec.fields:
+                    base_dtype = _numpy_dtype_for_base_type(f.base_type)
+                    dtype_fields.append((f.name, base_dtype))
+                dtype = np.dtype(dtype_fields)
+            except TypeError:
+                continue
+
+            def make_struct_class(spec, dtype):
+                slots = ("_data",)
+
+                def __init__(self, **kwargs):
+                    data = np.zeros((), dtype=dtype)
+                    for k in dtype.names:
+                        if k in kwargs:
+                            data[k] = kwargs[k]
+                    object.__setattr__(self, "_data", data)
+
+                def __repr__(self):
+                    parts = ", ".join(f"{name}={self._data[name].item()!r}" for name in dtype.names)
+                    return f"{spec.name}({parts})"
+
+                namespace = {
+                    "__slots__": slots,
+                    "__init__": __init__,
+                    "__repr__": __repr__,
+                    "__doc__": f"Python wrapper for C struct {spec.name}. Fields: {', '.join(dtype.names)}.",
+                    "dtype": dtype,
+                }
+
+                for fname in dtype.names:
+                    def getter(self, fname=fname):
+                        return self._data[fname].item()
+
+                    def setter(self, value, fname=fname):
+                        self._data[fname] = value
+
+                    namespace[fname] = property(getter, setter)
+
+                return type(spec.name, (), namespace)
+
+            struct_cls = make_struct_class(sspec, dtype)
+            self._struct_dtypes[sname] = dtype
+            self._struct_classes[sname] = struct_cls
+            setattr(self, sname, struct_cls)
+
     def _make_wrapper_from_spec(self, fspec: FuncSpec):
-        array_args = [a for a in fspec.args if a.is_array_in or a.is_array_out]
+        struct_names = set(self._struct_specs.keys())
+        struct_ptr_args = [a for a in fspec.args if a.is_pointer and a.base_type in struct_names]
+        array_args = [a for a in fspec.args if (a.is_array_in or a.is_array_out) and a not in struct_ptr_args]
         length_args = [a for a in fspec.args if a.is_length_param]
 
         if len(length_args) > 1:
@@ -447,6 +574,8 @@ class CModule:
             "_self": self,
             "np": np,
             "_numpy_dtype_for_base_type": _numpy_dtype_for_base_type,
+            "_struct_classes": self._struct_classes,
+            "_struct_dtypes": self._struct_dtypes,
         }
         filename = f"<cmodule:{self._c_path.name}:{fspec.name}>"
         linecache.cache[filename] = (
@@ -475,11 +604,14 @@ class CModule:
         except OSError:
             c_source_text = None
 
+        struct_names = set(self._struct_specs.keys())
         params: list[str] = []
         for a in fspec.args:
             if a.is_array_out and a.name.lower().startswith("out"):
                 params.append(f"{a.name}=None")
             elif a.is_length_param:
+                params.append(f"{a.name}=None")
+            elif a.is_pointer and a.base_type in struct_names and not a.is_const and a.name.lower().startswith("out"):
                 params.append(f"{a.name}=None")
             else:
                 params.append(a.name)
@@ -538,6 +670,32 @@ class CModule:
         length_name = length_args[0].name if length_args else None
 
         for a in fspec.args:
+            if a.is_pointer and a.base_type in struct_names:
+                dtype_expr = f"_struct_dtypes['{a.base_type}']"
+                cls_expr = f"_struct_classes['{a.base_type}']"
+                if not a.is_const and a.name.lower().startswith("out"):
+                    lines += [
+                        f"    if {a.name} is None:",
+                        f"        arr_{a.name} = np.zeros((), dtype={dtype_expr})",
+                        f"    elif isinstance({a.name}, {cls_expr}):",
+                        f"        arr_{a.name} = {a.name}._data",
+                        "    else:",
+                        f"        arr_{a.name} = np.ascontiguousarray({a.name}, dtype={dtype_expr})",
+                    ]
+                    output_vars.append(f"arr_{a.name}")
+                else:
+                    lines += [
+                        f"    if isinstance({a.name}, {cls_expr}):",
+                        f"        arr_{a.name} = {a.name}._data",
+                        "    else:",
+                        f"        arr_{a.name} = np.ascontiguousarray({a.name}, dtype={dtype_expr})",
+                    ]
+                lines += [
+                    f"    ptr_{a.name} = _self._ffi.cast('{a.base_type} *', _self._ffi.from_buffer(arr_{a.name}))",
+                ]
+                call_args.append(f"ptr_{a.name}")
+                continue
+
             if a.is_array_out and a.name.lower().startswith("out"):
                 dtype_expr = f"np.dtype('{np.dtype(_numpy_dtype_for_base_type(a.base_type)).name}')"
                 ref_name = a.name[4:] if a.name.lower().startswith("out_") else None
@@ -577,6 +735,29 @@ class CModule:
                 ]
                 call_args.append(f"ptr_{a.name}")
                 array_var_names.append(a.name)
+            elif a.is_pointer and a.base_type in struct_names:
+                dtype_expr = f"_struct_dtypes['{a.base_type}']"
+                cls_expr = f"_struct_classes['{a.base_type}']"
+                if not a.is_const and a.name.lower().startswith("out"):
+                    lines += [
+                        f"    if {a.name} is None:",
+                        f"        arr_{a.name} = np.zeros((), dtype={dtype_expr})",
+                        f"    elif isinstance({a.name}, {cls_expr}):",
+                        f"        arr_{a.name} = {a.name}._data",
+                        "    else:",
+                        f"        arr_{a.name} = np.ascontiguousarray({a.name}, dtype={dtype_expr})",
+                    ]
+                else:
+                    lines += [
+                        f"    if isinstance({a.name}, {cls_expr}):",
+                        f"        arr_{a.name} = {a.name}._data",
+                        "    else:",
+                        f"        arr_{a.name} = np.ascontiguousarray({a.name}, dtype={dtype_expr})",
+                    ]
+                lines += [
+                    f"    ptr_{a.name} = _self._ffi.cast('{a.base_type} *', _self._ffi.from_buffer(arr_{a.name}))",
+                ]
+                call_args.append(f"ptr_{a.name}")
             elif a.is_length_param:
                 # infer from naming convention if not provided
                 base_arr = None
@@ -604,7 +785,7 @@ class CModule:
                 lines += [f"    {a.name} = {a.name}"]
                 call_args.append(a.name)
 
-        if any(a.is_array_in or a.is_array_out for a in fspec.args):
+        if any((a.is_array_in or a.is_array_out) and a.base_type not in struct_names for a in fspec.args):
             if not length_name:
                 lines += [
                     f"    raise ValueError('{fspec.name}: array arguments require a length parameter')"
