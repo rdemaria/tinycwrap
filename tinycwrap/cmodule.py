@@ -435,20 +435,8 @@ class CModule:
         array_args = [a for a in fspec.args if a.is_array_in or a.is_array_out]
         length_args = [a for a in fspec.args if a.is_length_param]
 
-        if array_args and not length_args:
-            import warnings
-            warnings.warn(
-                f"{fspec.name}: array arguments require an explicit length parameter; skipping wrapper",
-                RuntimeWarning,
-            )
-            raise NotImplementedError
         if len(length_args) > 1:
-            import warnings
-            warnings.warn(
-                f"{fspec.name}: multiple length params not supported yet; skipping wrapper",
-                RuntimeWarning,
-            )
-            raise NotImplementedError
+            raise NotImplementedError(f"{fspec.name}: multiple length params not supported yet")
 
         # validate array types
         for a in array_args:
