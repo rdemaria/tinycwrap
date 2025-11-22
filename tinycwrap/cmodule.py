@@ -2,6 +2,7 @@ import re
 import hashlib
 import tempfile
 import subprocess
+import linecache
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -107,7 +108,31 @@ class CModule:
         compile_args=None,
         auto_wrap=True,
         auto_cdef=True,
+        reload=True,
     ):
+        """
+        Parameters
+        ----------
+        c_path : str or Path
+            Path to the primary C source file to compile.
+        cdef : str, optional
+            Explicit CFFI cdef string. If None and auto_cdef is True, it is generated from the source.
+        extra_sources : list[str | Path], optional
+            Additional C source files to compile and link.
+        include_dirs : list[str | Path], optional
+            Additional include directories for the compiler.
+        compiler : str, default "gcc"
+            C compiler executable to invoke.
+        compile_args : list[str], optional
+            Extra compiler flags. Defaults to ["-O3", "-shared", "-fPIC"].
+        auto_wrap : bool, default True
+            Whether to generate Python wrappers for exported C functions.
+        auto_cdef : bool, default True
+            Whether to auto-generate the cdef from the C source when cdef is None.
+        reload : bool, default True
+            If True and running inside IPython, register a pre-run-cell hook to auto-recompile
+            when the C source changes.
+        """
         self.c_path = Path(c_path)
         self.extra_sources = [Path(p) for p in (extra_sources or [])]
         self.include_dirs = list(include_dirs or [])
@@ -115,6 +140,7 @@ class CModule:
         self.compile_args = compile_args or ["-O3", "-shared", "-fPIC"]
         self.auto_wrap = auto_wrap
         self.auto_cdef = auto_cdef
+        self._auto_cdef_from_source = cdef is None and auto_cdef
 
         self._ffi = None
         self._lib = None
@@ -123,13 +149,19 @@ class CModule:
 
         # will be filled after parsing
         self._func_specs: dict[str, FuncSpec] = {}
+        self._ipython_hook = None
 
         # if cdef not provided, generate it from C file
-        if cdef is None and auto_cdef:
+        if self._auto_cdef_from_source:
             cdef = self._generate_cdef_from_source()
         self.cdef = cdef
 
         self.ensure_compiled()
+        if reload:
+            try:
+                self.register_ipython_autoreload()
+            except Exception:
+                pass
 
     # ---------- build & reload ---------------------------------------------
 
@@ -160,6 +192,10 @@ class CModule:
         include_dirs = self.include_dirs + [np.get_include()]
         for inc in include_dirs:
             cmd.extend(["-I", str(inc)])
+
+        # regenerate cdef if we auto-generate from source
+        if self._auto_cdef_from_source:
+            self.cdef = self._generate_cdef_from_source()
 
         sources = [str(self.c_path), *(str(p) for p in self.extra_sources)]
         cmd.extend(["-o", str(so_path), *sources])
@@ -199,6 +235,47 @@ class CModule:
     def lib(self):
         self.ensure_compiled()
         return self._lib
+
+    # ---------- IPython auto-reload hook ------------------------------------
+
+    def register_ipython_autoreload(self):
+        """Register a pre-run-cell hook in IPython to auto-recompile if sources changed."""
+        try:
+            from IPython import get_ipython  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError("IPython is required for auto-reload") from exc
+        ip = get_ipython()
+        if ip is None:
+            raise RuntimeError("No active IPython session")
+        if self._ipython_hook is not None:
+            return
+
+        def _hook(*_args, **_kwargs):
+            try:
+                self.ensure_compiled()
+            except Exception as exc:  # pragma: no cover - defensive
+                print(f"[CModule] Auto-compile failed: {exc}")
+
+        ip.events.register("pre_run_cell", _hook)
+        self._ipython_hook = _hook
+
+    def unregister_ipython_autoreload(self):
+        """Remove the IPython pre-run-cell hook if registered."""
+        hook = self._ipython_hook
+        if hook is None:
+            return
+        try:
+            from IPython import get_ipython  # type: ignore
+        except ImportError:
+            self._ipython_hook = None
+            return
+        ip = get_ipython()
+        if ip is not None:
+            try:
+                ip.events.unregister("pre_run_cell", hook)
+            except Exception:
+                pass
+        self._ipython_hook = None
 
     # ---------- 1) auto-generate cdef from C source -------------------------
 
@@ -401,9 +478,21 @@ class CModule:
             "np": np,
             "_numpy_dtype_for_base_type": _numpy_dtype_for_base_type,
         }
-        exec(src, namespace)
+        filename = f"<cmodule:{self.c_path.name}:{fspec.name}>"
+        linecache.cache[filename] = (
+            len(src),
+            None,
+            [line + "\n" for line in src.splitlines()],
+            filename,
+        )
+        code = compile(src, filename, "exec")
+        exec(code, namespace)
         wrapper = namespace[fspec.name]
         wrapper.__source__ = src
+        try:
+            wrapper.__c_source__ = self.c_path.read_text(encoding="utf8")
+        except OSError:
+            wrapper.__c_source__ = None
         return wrapper
 
     def _build_wrapper_source(self, fspec: FuncSpec) -> str:
@@ -411,6 +500,11 @@ class CModule:
         Build the Python source string for a wrapper with an explicit signature.
         Keeping this separate allows inspection/debugging of the generated code.
         """
+        try:
+            c_source_text = self.c_path.read_text(encoding="utf8")
+        except OSError:
+            c_source_text = None
+
         params: list[str] = []
         for a in fspec.args:
             if a.is_array_out and a.name.lower().startswith("out"):
@@ -421,9 +515,45 @@ class CModule:
                 params.append(a.name)
 
         signature = ", ".join(params)
+        arg_docs: list[str] = []
+        for a in fspec.args:
+            role = "scalar"
+            if a.is_array_in:
+                role = "array in"
+            elif a.is_array_out:
+                role = "array out"
+            elif a.is_length_param:
+                role = "length"
+            ctype = a.raw_ctype.strip()
+            extra = []
+            if a.is_array_out and a.name.lower().startswith("out"):
+                extra.append("auto if None")
+            if a.is_length_param:
+                extra.append("auto from array length")
+            extra_txt = f" [{' '.join(extra)}]" if extra else ""
+            arg_docs.append(f"{a.name} : {ctype} ({role}){extra_txt}")
+
         doc_lines = [f"Auto-wrapped C function `{fspec.name}`."]
         if fspec.doc:
             doc_lines.append(fspec.doc)
+        if arg_docs:
+            doc_lines.extend(
+                [
+                    "",
+                    "Parameters",
+                    "----------",
+                    *arg_docs,
+                ]
+            )
+        if c_source_text:
+            doc_lines.extend(
+                [
+                    "",
+                    "C source",
+                    "--------",
+                    *(line for line in c_source_text.splitlines()),
+                ]
+            )
 
         lines = [
             f"def {fspec.name}({signature}):",
