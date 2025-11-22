@@ -29,12 +29,7 @@ rm -rf dist/ *.egg-info
 echo "Building distribution..."
 python -m build
 
-echo "Uploading to PyPI..."
-if [[ -z "${PYPI_TOKEN:-}" ]]; then
-  echo "Set PYPI_TOKEN to your API token (e.g. pypi-xxxx) before releasing." >&2
-  exit 1
-fi
-
+echo "Uploading to pypi..."
 twine upload dist/*
 
 echo "Tagging and pushing..."
