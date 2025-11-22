@@ -35,9 +35,6 @@ if [[ -z "${PYPI_TOKEN:-}" ]]; then
   exit 1
 fi
 
-export TWINE_USERNAME="__token__"
-export TWINE_PASSWORD="$PYPI_TOKEN"
-
 twine upload dist/*
 
 echo "Tagging and pushing..."
