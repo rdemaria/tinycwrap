@@ -12,8 +12,14 @@ from cffi import FFI
 # ---------------- helpers --------------------------------------------------
 
 
+def _strip_restrict_keywords(text: str) -> str:
+    """Remove C restrict qualifiers (including compiler-specific variants)."""
+    return re.sub(r"\b(__restrict__|__restrict|restrict)\b", "", text)
+
+
 def _base_type_from_ctype(ctype: str) -> str:
     """Normalize base C type (strip const, *, etc.)."""
+    ctype = _strip_restrict_keywords(ctype)
     ctype = ctype.replace("const", "").replace("volatile", "")
     ctype = ctype.replace("*", "").strip()
     return " ".join(ctype.split())
@@ -237,9 +243,9 @@ class CModule:
             if m.group("prefix") and "static" in m.group("prefix"):
                 # ignore static functions, not exported
                 continue
-            ret = " ".join(m.group("ret").split())
+            ret = " ".join(_strip_restrict_keywords(m.group("ret")).split())
             name = m.group("name")
-            args = " ".join(m.group("args").split())
+            args = " ".join(_strip_restrict_keywords(m.group("args")).split())
             proto = f"{ret} {name}({args});"
             prototypes.append(proto)
 
@@ -256,6 +262,7 @@ class CModule:
         text = cdef
         text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
         text = re.sub(r"//.*?$", "", text, flags=re.MULTILINE)
+        text = _strip_restrict_keywords(text)
 
         decls = []
         buff = []
@@ -391,26 +398,58 @@ class CModule:
             ffi = self.ffi
             cfun = getattr(lib, fspec.name)
 
-            if len(args) != len(array_args) + len(scalar_args):
+            out_array_specs = [
+                a for a in array_args if a.is_array_out and a.name.lower().startswith("out")
+            ]
+            in_array_specs = [a for a in array_args if a not in out_array_specs]
+
+            if len(args) != len(in_array_specs) + len(scalar_args):
                 raise TypeError(
-                    f"{fspec.name} expects {len(array_args)} array args and "
+                    f"{fspec.name} expects {len(in_array_specs)} array args and "
                     f"{len(scalar_args)} scalar args, got {len(args)}"
                 )
 
-            py_array_vals = args[: len(array_args)]
-            py_scalar_vals = args[len(array_args) :]
+            py_array_vals = args[: len(in_array_specs)]
+            py_scalar_vals = args[len(in_array_specs) :]
 
             # prepare arrays
             c_array_ptrs = []
             lengths = []
+            output_arrays: list[np.ndarray] = []
 
-            for a, val in zip(array_args, py_array_vals):
+            # user-provided (input) arrays
+            for a, val in zip(in_array_specs, py_array_vals):
                 base_dtype = _numpy_dtype_for_base_type(a.base_type)
                 arr = np.ascontiguousarray(val, dtype=base_dtype)
                 lengths.append(arr.size)
                 ctype = f"{'const ' if a.is_const else ''}{a.base_type} *"
                 ptr = ffi.cast(ctype, ffi.from_buffer(arr))
                 c_array_ptrs.append((a, arr, ptr))
+
+            # auto-created output arrays
+            for a in out_array_specs:
+                base_dtype = _numpy_dtype_for_base_type(a.base_type)
+                ref_arr = None
+                if a.name.lower().startswith("out_"):
+                    ref_name = a.name[4:]
+                    for (aa, arr, _ptr) in c_array_ptrs:
+                        if aa.name == ref_name:
+                            ref_arr = arr
+                            break
+                if ref_arr is not None:
+                    arr = np.empty_like(ref_arr, dtype=base_dtype)
+                else:
+                    target_len = lengths[0] if lengths else None
+                    if target_len is None:
+                        raise ValueError(
+                            f"{fspec.name}: cannot determine length for output array {a.name}"
+                        )
+                    arr = np.empty(target_len, dtype=base_dtype)
+                lengths.append(arr.size)
+                ctype = f"{a.base_type} *"
+                ptr = ffi.cast(ctype, ffi.from_buffer(arr))
+                c_array_ptrs.append((a, arr, ptr))
+                output_arrays.append(arr)
 
             if lengths:
                 n0 = lengths[0]
@@ -449,6 +488,12 @@ class CModule:
 
             res = cfun(*c_args)
 
+            if output_arrays:
+                outputs = output_arrays[0] if len(output_arrays) == 1 else tuple(output_arrays)
+                if fspec.return_ctype.strip() == "void":
+                    return outputs
+                return outputs, res
+
             if fspec.return_ctype.strip() == "void":
                 return None
             else:
@@ -460,5 +505,3 @@ class CModule:
             doc_lines.append(fspec.doc)
         wrapper.__doc__ = "\n".join(doc_lines)
         return wrapper
-
-

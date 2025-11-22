@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tinycwrap"
+version = "0.0.0"
+description = "Lightweight C-to-Python wrapper generator using CFFI and NumPy"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.24",
+    "cffi>=1.15",
+]
+authors = [{ name = "TinyCWrap Contributors" }]
+
+[tool.setuptools]
+packages = ["tinycwrap"]
