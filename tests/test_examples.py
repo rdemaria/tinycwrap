@@ -6,7 +6,7 @@ from tinycwrap import CModule
 
 
 def test_dot_and_scale_example():
-    c_path = Path(__file__).resolve().parent.parent / "examples" / "kernels.c"
+    c_path = Path(__file__).resolve().parent / "kernels.c"
     cm = CModule(c_path)
 
     x = np.arange(10, dtype=np.float64)

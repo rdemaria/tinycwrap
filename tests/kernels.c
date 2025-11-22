@@ -1,5 +1,4 @@
 #include <stddef.h>
-#include <math.h>
 
 double dot(const double *restrict x, const double *restrict y, int len_x)
 /* Return dot product between x and y */
@@ -23,13 +22,4 @@ void cross(const double *restrict a, const double *restrict b, double *restrict 
     out[0] = a[1] * b[2] - a[2] * b[1];
     out[1] = a[2] * b[0] - a[0] * b[2];
     out[2] = a[0] * b[1] - a[1] * b[0];
-}
-
-double norm(const double *restrict x, int len_x)
-/* Compute the Euclidean norm of vector x */
-{
-    double sum_sq = 0.0;
-    for (int i = 0; i < len_x; ++i)
-        sum_sq += x[i] * x[i];
-    return sqrt(sum_sq);
 }

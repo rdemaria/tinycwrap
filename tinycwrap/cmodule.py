@@ -100,47 +100,38 @@ class CModule:
 
     def __init__(
         self,
-        c_path,
-        cdef: str | None = None,
-        extra_sources=None,
+        *c_sources,
         include_dirs=None,
         compiler="gcc",
         compile_args=None,
-        auto_wrap=True,
-        auto_cdef=True,
         reload=True,
     ):
         """
         Parameters
         ----------
-        c_path : str or Path
-            Path to the primary C source file to compile.
-        cdef : str, optional
-            Explicit CFFI cdef string. If None and auto_cdef is True, it is generated from the source.
-        extra_sources : list[str | Path], optional
-            Additional C source files to compile and link.
+        c_sources : str or Path
+            One or more C source files to compile. The first is treated as the primary file
+            for cdef generation and doc extraction; others are linked in.
         include_dirs : list[str | Path], optional
             Additional include directories for the compiler.
         compiler : str, default "gcc"
             C compiler executable to invoke.
         compile_args : list[str], optional
             Extra compiler flags. Defaults to ["-O3", "-shared", "-fPIC"].
-        auto_wrap : bool, default True
-            Whether to generate Python wrappers for exported C functions.
-        auto_cdef : bool, default True
-            Whether to auto-generate the cdef from the C source when cdef is None.
         reload : bool, default True
             If True and running inside IPython, register a pre-run-cell hook to auto-recompile
             when the C source changes.
         """
-        self.c_path = Path(c_path)
-        self.extra_sources = [Path(p) for p in (extra_sources or [])]
-        self.include_dirs = list(include_dirs or [])
-        self.compiler = compiler
-        self.compile_args = compile_args or ["-O3", "-shared", "-fPIC"]
-        self.auto_wrap = auto_wrap
-        self.auto_cdef = auto_cdef
-        self._auto_cdef_from_source = cdef is None and auto_cdef
+        if not c_sources:
+            raise ValueError("At least one C source path is required")
+        self._c_path = Path(c_sources[0])
+        self._extra_sources = [Path(p) for p in c_sources[1:]]
+        self._compile_options = {
+            "include_dirs": list(include_dirs or []),
+            "compiler": compiler,
+            "compile_args": compile_args or ["-O3", "-shared", "-fPIC"],
+        }
+        self._auto_cdef_from_source = True
 
         self._ffi = None
         self._lib = None
@@ -151,15 +142,13 @@ class CModule:
         self._func_specs: dict[str, FuncSpec] = {}
         self._ipython_hook = None
 
-        # if cdef not provided, generate it from C file
-        if self._auto_cdef_from_source:
-            cdef = self._generate_cdef_from_source()
-        self.cdef = cdef
+        # always generate cdef from C file
+        self._cdef = self._generate_cdef_from_source()
 
-        self.ensure_compiled()
+        self._ensure_compiled()
         if reload:
             try:
-                self.register_ipython_autoreload()
+                self._register_ipython_autoreload()
             except Exception:
                 pass
 
@@ -167,7 +156,7 @@ class CModule:
 
     def _compute_sig(self):
         h = hashlib.sha1()
-        all_paths = [self.c_path] + self.extra_sources
+        all_paths = [self._c_path] + self._extra_sources
         for p in all_paths:
             st = p.stat()
             h.update(str(p.resolve()).encode("utf-8"))
@@ -184,27 +173,27 @@ class CModule:
         build_dir = Path(tempfile.gettempdir()) / "cmodule_build"
         build_dir.mkdir(parents=True, exist_ok=True)
 
-        so_name = f"cmodule_{self.c_path.stem}_{sig}.so"
+        so_name = f"cmodule_{self._c_path.stem}_{sig}.so"
         so_path = build_dir / so_name
 
-        cmd = [self.compiler, *self.compile_args]
+        cmd = [self._compile_options["compiler"], *self._compile_options["compile_args"]]
 
-        include_dirs = self.include_dirs + [np.get_include()]
+        include_dirs = self._compile_options["include_dirs"] + [np.get_include()]
         for inc in include_dirs:
             cmd.extend(["-I", str(inc)])
 
         # regenerate cdef if we auto-generate from source
         if self._auto_cdef_from_source:
-            self.cdef = self._generate_cdef_from_source()
+            self._cdef = self._generate_cdef_from_source()
 
-        sources = [str(self.c_path), *(str(p) for p in self.extra_sources)]
+        sources = [str(self._c_path), *(str(p) for p in self._extra_sources)]
         cmd.extend(["-o", str(so_path), *sources])
 
         print(f"[CModule] Compiling: {' '.join(cmd)}")
         subprocess.run(cmd, check=True)
 
         ffi = FFI()
-        ffi.cdef(self.cdef)
+        ffi.cdef(self._cdef)
         lib = ffi.dlopen(str(so_path))
 
         self._ffi = ffi
@@ -215,30 +204,17 @@ class CModule:
         print(f"[CModule] Loaded {so_path}")
 
         # Re-parse cdef and attach docs from C source, then create wrappers
-        if self.auto_wrap:
-            self._func_specs = self._parse_cdef(self.cdef)
-            self._attach_docs_from_source()
-            self._create_wrappers()
+        self._func_specs = self._parse_cdef(self._cdef)
+        self._attach_docs_from_source()
+        self._create_wrappers()
 
-    def ensure_compiled(self):
+    def _ensure_compiled(self):
         if self._needs_recompile():
             self._compile_and_load()
 
-    # ---------- properties ---------------------------------------------------
-
-    @property
-    def ffi(self):
-        self.ensure_compiled()
-        return self._ffi
-
-    @property
-    def lib(self):
-        self.ensure_compiled()
-        return self._lib
-
     # ---------- IPython auto-reload hook ------------------------------------
 
-    def register_ipython_autoreload(self):
+    def _register_ipython_autoreload(self):
         """Register a pre-run-cell hook in IPython to auto-recompile if sources changed."""
         try:
             from IPython import get_ipython  # type: ignore
@@ -252,14 +228,14 @@ class CModule:
 
         def _hook(*_args, **_kwargs):
             try:
-                self.ensure_compiled()
+                self._ensure_compiled()
             except Exception as exc:  # pragma: no cover - defensive
                 print(f"[CModule] Auto-compile failed: {exc}")
 
         ip.events.register("pre_run_cell", _hook)
         self._ipython_hook = _hook
 
-    def unregister_ipython_autoreload(self):
+    def _unregister_ipython_autoreload(self):
         """Remove the IPython pre-run-cell hook if registered."""
         hook = self._ipython_hook
         if hook is None:
@@ -292,7 +268,7 @@ class CModule:
         and turn them into:
             <ret> name(<args>);
         """
-        src = self.c_path.read_text(encoding="utf8")
+        src = self._c_path.read_text(encoding="utf8")
 
         # Remove preprocessor lines to simplify
         src_wo_pp = re.sub(r"^\s*#.*$", "", src, flags=re.MULTILINE)
@@ -327,7 +303,7 @@ class CModule:
             prototypes.append(proto)
 
         if not prototypes:
-            raise RuntimeError(f"No functions found in {self.c_path} to generate cdef")
+            raise RuntimeError(f"No functions found in {self._c_path} to generate cdef")
 
         cdef = "\n".join(prototypes)
         print("[CModule] Auto-generated cdef:\n" + cdef)
@@ -427,7 +403,7 @@ class CModule:
 
     def _attach_docs_from_source(self):
         try:
-            src = self.c_path.read_text(encoding="utf8")
+            src = self._c_path.read_text(encoding="utf8")
         except OSError:
             return
 
@@ -460,13 +436,19 @@ class CModule:
         length_args = [a for a in fspec.args if a.is_length_param]
 
         if array_args and not length_args:
-            raise NotImplementedError(
-                f"{fspec.name}: array arguments require an explicit length parameter"
+            import warnings
+            warnings.warn(
+                f"{fspec.name}: array arguments require an explicit length parameter; skipping wrapper",
+                RuntimeWarning,
             )
+            raise NotImplementedError
         if len(length_args) > 1:
-            raise NotImplementedError(
-                f"{fspec.name}: multiple length params not supported yet"
+            import warnings
+            warnings.warn(
+                f"{fspec.name}: multiple length params not supported yet; skipping wrapper",
+                RuntimeWarning,
             )
+            raise NotImplementedError
 
         # validate array types
         for a in array_args:
@@ -478,7 +460,7 @@ class CModule:
             "np": np,
             "_numpy_dtype_for_base_type": _numpy_dtype_for_base_type,
         }
-        filename = f"<cmodule:{self.c_path.name}:{fspec.name}>"
+        filename = f"<cmodule:{self._c_path.name}:{fspec.name}>"
         linecache.cache[filename] = (
             len(src),
             None,
@@ -490,7 +472,7 @@ class CModule:
         wrapper = namespace[fspec.name]
         wrapper.__source__ = src
         try:
-            wrapper.__c_source__ = self.c_path.read_text(encoding="utf8")
+            wrapper.__c_source__ = self._c_path.read_text(encoding="utf8")
         except OSError:
             wrapper.__c_source__ = None
         return wrapper
@@ -501,7 +483,7 @@ class CModule:
         Keeping this separate allows inspection/debugging of the generated code.
         """
         try:
-            c_source_text = self.c_path.read_text(encoding="utf8")
+            c_source_text = self._c_path.read_text(encoding="utf8")
         except OSError:
             c_source_text = None
 
@@ -579,12 +561,12 @@ class CModule:
                     lines += [
                         f"        ref_arr = locals().get('arr_{ref_name}', None)",
                         "        if ref_arr is not None:",
-                        "            arr = np.empty_like(ref_arr, dtype=base_dtype)",
+                        f"            arr_{a.name} = np.empty_like(ref_arr, dtype=base_dtype)",
                         "        else:",
                     ]
                 if length_name:
                     lines += [
-                        f"            arr = np.empty(int({length_name}), dtype=base_dtype)",
+                        f"            arr_{a.name} = np.empty(int({length_name}), dtype=base_dtype)",
                     ]
                 else:
                     lines += [
@@ -592,9 +574,8 @@ class CModule:
                     ]
                 lines += [
                     "    else:",
-                    f"        arr = np.ascontiguousarray({a.name}, dtype=base_dtype)",
-                    f"    ptr_{a.name} = _self._ffi.cast('{a.base_type} *', _self._ffi.from_buffer(arr))",
-                    f"    arr_{a.name} = arr",
+                    f"        arr_{a.name} = np.ascontiguousarray({a.name}, dtype=base_dtype)",
+                    f"    ptr_{a.name} = _self._ffi.cast('{a.base_type} *', _self._ffi.from_buffer(arr_{a.name}))",
                 ]
                 call_args.append(f"ptr_{a.name}")
                 output_vars.append(f"arr_{a.name}")
@@ -603,9 +584,8 @@ class CModule:
                 const_prefix = "const " if a.is_const else ""
                 dtype_expr = f"np.dtype('{np.dtype(_numpy_dtype_for_base_type(a.base_type)).name}')"
                 lines += [
-                    f"    arr = np.ascontiguousarray({a.name}, dtype={dtype_expr})",
-                    f"    ptr_{a.name} = _self._ffi.cast('{const_prefix}{a.base_type} *', _self._ffi.from_buffer(arr))",
-                    f"    arr_{a.name} = arr",
+                    f"    arr_{a.name} = np.ascontiguousarray({a.name}, dtype={dtype_expr})",
+                    f"    ptr_{a.name} = _self._ffi.cast('{const_prefix}{a.base_type} *', _self._ffi.from_buffer(arr_{a.name}))",
                 ]
                 call_args.append(f"ptr_{a.name}")
                 array_var_names.append(a.name)
