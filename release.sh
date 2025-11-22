@@ -26,6 +26,9 @@ fi
 
 rm -rf dist/ *.egg-info
 
+echo "Ensuring packaging tools are present..."
+python -m pip install --upgrade build twine >/dev/null
+
 echo "Building distribution..."
 python -m build
 
