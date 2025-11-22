@@ -16,5 +16,11 @@ def test_dot_and_scale_example():
     assert cm.dot(x, y) == np.sum(x * y)
 
     # scale example (auto output for out_x)
-    scaled = cm.scale(x, 1.1)
-    np.testing.assert_allclose(scaled, x * 1.1)
+    scaled_auto = cm.scale(x, 1.1)
+    np.testing.assert_allclose(scaled_auto, x * 1.1)
+
+    # scale example with explicit output array
+    out = np.empty_like(x)
+    scaled_explicit = cm.scale(x, 2.0, out_x=out)
+    np.testing.assert_allclose(out, x * 2.0)
+    np.testing.assert_allclose(scaled_explicit, x * 2.0)

@@ -380,9 +380,12 @@ class CModule:
 
     def _make_wrapper_from_spec(self, fspec: FuncSpec):
         array_args = [a for a in fspec.args if a.is_array_in or a.is_array_out]
-        scalar_args = [a for a in fspec.args if a.is_scalar]
         length_args = [a for a in fspec.args if a.is_length_param]
 
+        if array_args and not length_args:
+            raise NotImplementedError(
+                f"{fspec.name}: array arguments require an explicit length parameter"
+            )
         if len(length_args) > 1:
             raise NotImplementedError(
                 f"{fspec.name}: multiple length params not supported yet"
@@ -392,116 +395,150 @@ class CModule:
         for a in array_args:
             _numpy_dtype_for_base_type(a.base_type)
 
-        def wrapper(*args):
-            self.ensure_compiled()
-            lib = self.lib
-            ffi = self.ffi
-            cfun = getattr(lib, fspec.name)
+        src = self._build_wrapper_source(fspec)
+        namespace = {
+            "_self": self,
+            "np": np,
+            "_numpy_dtype_for_base_type": _numpy_dtype_for_base_type,
+        }
+        exec(src, namespace)
+        wrapper = namespace[fspec.name]
+        wrapper.__source__ = src
+        return wrapper
 
-            out_array_specs = [
-                a for a in array_args if a.is_array_out and a.name.lower().startswith("out")
-            ]
-            in_array_specs = [a for a in array_args if a not in out_array_specs]
-
-            if len(args) != len(in_array_specs) + len(scalar_args):
-                raise TypeError(
-                    f"{fspec.name} expects {len(in_array_specs)} array args and "
-                    f"{len(scalar_args)} scalar args, got {len(args)}"
-                )
-
-            py_array_vals = args[: len(in_array_specs)]
-            py_scalar_vals = args[len(in_array_specs) :]
-
-            # prepare arrays
-            c_array_ptrs = []
-            lengths = []
-            output_arrays: list[np.ndarray] = []
-
-            # user-provided (input) arrays
-            for a, val in zip(in_array_specs, py_array_vals):
-                base_dtype = _numpy_dtype_for_base_type(a.base_type)
-                arr = np.ascontiguousarray(val, dtype=base_dtype)
-                lengths.append(arr.size)
-                ctype = f"{'const ' if a.is_const else ''}{a.base_type} *"
-                ptr = ffi.cast(ctype, ffi.from_buffer(arr))
-                c_array_ptrs.append((a, arr, ptr))
-
-            # auto-created output arrays
-            for a in out_array_specs:
-                base_dtype = _numpy_dtype_for_base_type(a.base_type)
-                ref_arr = None
-                if a.name.lower().startswith("out_"):
-                    ref_name = a.name[4:]
-                    for (aa, arr, _ptr) in c_array_ptrs:
-                        if aa.name == ref_name:
-                            ref_arr = arr
-                            break
-                if ref_arr is not None:
-                    arr = np.empty_like(ref_arr, dtype=base_dtype)
-                else:
-                    target_len = lengths[0] if lengths else None
-                    if target_len is None:
-                        raise ValueError(
-                            f"{fspec.name}: cannot determine length for output array {a.name}"
-                        )
-                    arr = np.empty(target_len, dtype=base_dtype)
-                lengths.append(arr.size)
-                ctype = f"{a.base_type} *"
-                ptr = ffi.cast(ctype, ffi.from_buffer(arr))
-                c_array_ptrs.append((a, arr, ptr))
-                output_arrays.append(arr)
-
-            if lengths:
-                n0 = lengths[0]
-                for ln in lengths[1:]:
-                    if ln != n0:
-                        raise ValueError("Array arguments must have same length")
-                inferred_len = n0
+    def _build_wrapper_source(self, fspec: FuncSpec) -> str:
+        """
+        Build the Python source string for a wrapper with an explicit signature.
+        Keeping this separate allows inspection/debugging of the generated code.
+        """
+        params: list[str] = []
+        for a in fspec.args:
+            if a.is_array_out and a.name.lower().startswith("out"):
+                params.append(f"{a.name}=None")
+            elif a.is_length_param:
+                params.append(f"{a.name}=None")
             else:
-                inferred_len = None
+                params.append(a.name)
 
-            scalar_vals_iter = iter(py_scalar_vals)
-            c_args = []
-
-            for a in fspec.args:
-                if a.is_array_in or a.is_array_out:
-                    for (aa, arr, ptr) in c_array_ptrs:
-                        if aa is a:
-                            c_args.append(ptr)
-                            break
-                    else:
-                        raise RuntimeError("Internal error mapping array arg")
-                elif a.is_length_param:
-                    if inferred_len is None:
-                        raise ValueError(
-                            f"{fspec.name}: cannot infer length for {a.name}"
-                        )
-                    c_args.append(inferred_len)
-                elif a.is_scalar:
-                    try:
-                        sv = next(scalar_vals_iter)
-                    except StopIteration:
-                        raise TypeError("Not enough scalar arguments")
-                    c_args.append(sv)
-                else:
-                    raise RuntimeError("Arg classification inconsistent")
-
-            res = cfun(*c_args)
-
-            if output_arrays:
-                outputs = output_arrays[0] if len(output_arrays) == 1 else tuple(output_arrays)
-                if fspec.return_ctype.strip() == "void":
-                    return outputs
-                return outputs, res
-
-            if fspec.return_ctype.strip() == "void":
-                return None
-            else:
-                return res
-
-        wrapper.__name__ = fspec.name
+        signature = ", ".join(params)
         doc_lines = [f"Auto-wrapped C function `{fspec.name}`."]
         if fspec.doc:
             doc_lines.append(fspec.doc)
-        wrapper.__doc__ = "\n".join(doc_lines)
-        return wrapper
+
+        lines = [
+            f"def {fspec.name}({signature}):",
+            '    """' + ("\n    ".join(doc_lines)) + '"""',
+            f"    cfun = getattr(_self._lib, '{fspec.name}')",
+        ]
+
+        output_vars: list[str] = []
+        call_args: list[str] = []
+        array_var_names: list[str] = []
+        length_args = [a for a in fspec.args if a.is_length_param]
+        length_name = length_args[0].name if length_args else None
+
+        for a in fspec.args:
+            if a.is_array_out and a.name.lower().startswith("out"):
+                dtype_expr = f"np.dtype('{np.dtype(_numpy_dtype_for_base_type(a.base_type)).name}')"
+                ref_name = a.name[4:] if a.name.lower().startswith("out_") else None
+                lines += [
+                    f"    base_dtype = {dtype_expr}",
+                    f"    if {a.name} is None:",
+                ]
+                if ref_name:
+                    lines += [
+                        f"        ref_arr = locals().get('arr_{ref_name}', None)",
+                        "        if ref_arr is not None:",
+                        "            arr = np.empty_like(ref_arr, dtype=base_dtype)",
+                        "        else:",
+                    ]
+                if length_name:
+                    lines += [
+                        f"            arr = np.empty(int({length_name}), dtype=base_dtype)",
+                    ]
+                else:
+                    lines += [
+                        f"            raise ValueError('{fspec.name}: missing length parameter for output array {a.name}')",
+                    ]
+                lines += [
+                    "    else:",
+                    f"        arr = np.ascontiguousarray({a.name}, dtype=base_dtype)",
+                    f"    ptr_{a.name} = _self._ffi.cast('{a.base_type} *', _self._ffi.from_buffer(arr))",
+                    f"    arr_{a.name} = arr",
+                ]
+                call_args.append(f"ptr_{a.name}")
+                output_vars.append(f"arr_{a.name}")
+                array_var_names.append(a.name)
+            elif a.is_array_in or a.is_array_out:
+                const_prefix = "const " if a.is_const else ""
+                dtype_expr = f"np.dtype('{np.dtype(_numpy_dtype_for_base_type(a.base_type)).name}')"
+                lines += [
+                    f"    arr = np.ascontiguousarray({a.name}, dtype={dtype_expr})",
+                    f"    ptr_{a.name} = _self._ffi.cast('{const_prefix}{a.base_type} *', _self._ffi.from_buffer(arr))",
+                    f"    arr_{a.name} = arr",
+                ]
+                call_args.append(f"ptr_{a.name}")
+                array_var_names.append(a.name)
+            elif a.is_length_param:
+                # infer from naming convention if not provided
+                base_arr = None
+                if a.name.startswith("len_"):
+                    base_arr = a.name[4:]
+                elif a.name.startswith("n_"):
+                    base_arr = a.name[2:]
+                elif a.name.startswith("size_"):
+                    base_arr = a.name[5:]
+                target_arr = base_arr if base_arr in array_var_names else (array_var_names[0] if array_var_names else None)
+                if target_arr:
+                    lines += [
+                        f"    if {a.name} is None:",
+                        f"        {a.name} = len(arr_{target_arr})",
+                        f"    {a.name} = int({a.name})",
+                    ]
+                else:
+                    lines += [
+                        f"    if {a.name} is None:",
+                        f"        raise ValueError('{fspec.name}: cannot infer length for {a.name}')",
+                        f"    {a.name} = int({a.name})",
+                    ]
+                call_args.append(a.name)
+            elif a.is_scalar:
+                lines += [f"    {a.name} = {a.name}"]
+                call_args.append(a.name)
+
+        if any(a.is_array_in or a.is_array_out for a in fspec.args):
+            if not length_name:
+                lines += [
+                    f"    raise ValueError('{fspec.name}: array arguments require a length parameter')"
+                ]
+
+        ret_type = fspec.return_ctype.strip()
+        call_expr = f"cfun({', '.join(call_args)})"
+        if ret_type == "void":
+            lines += [
+                f"    {call_expr}",
+            ]
+        else:
+            lines += [
+                f"    res = {call_expr}",
+            ]
+
+        if output_vars:
+            tuple_expr = output_vars[0] if len(output_vars) == 1 else f"({', '.join(output_vars)})"
+            if ret_type == "void":
+                lines += [
+                    "    outputs = " + tuple_expr,
+                    "    return outputs",
+                ]
+            else:
+                lines += [
+                    "    outputs = " + tuple_expr,
+                    "    return outputs, res",
+                ]
+        else:
+            if ret_type == "void":
+                lines.append("    return None")
+            else:
+                lines.append("    return res")
+
+        return "\n".join(lines)
