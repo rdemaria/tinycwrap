@@ -79,6 +79,15 @@ def test_two_output_arrays(cm):
     np.testing.assert_allclose(out2, np.array([1, 3, 5], dtype=np.float64))
 
 
+def test_merge_sorted(cm):
+    a = np.array([1.0, 2.0, 2.0, 4.0], dtype=np.float64)
+    b = np.array([2.0, 3.0], dtype=np.float64)
+    out_len = np.zeros(1, dtype=np.int32)
+    merged, out_len_val = cm.merge_sorted(a, b, out_len=out_len)
+    np.testing.assert_allclose(merged, np.array([1.0, 2.0, 3.0, 4.0]))
+    assert out_len_val == 4
+
+
 def test_struct_output_array(cm):
     n = 4
     particles = cm.Particle.zeros(n)

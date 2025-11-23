@@ -21,8 +21,11 @@ void geom2d_circle_get_n_points(double cx, double cy, double r, int len_points, 
     }
 }
 
-void geom2d_circle_get_points(double cx, double cy, double r, G2DPoint out_points[101])
-/* Get 101 points on the circumference of a circle */
+void geom2d_circle_get_points(double cx, double cy, double r, G2DPoint *out_points)
+/* Get 101 points on the circumference of a circle
+
+Contract: len(out_points)=101;
+*/
 {
     int len_points = 101;
     double angle_step = 2.0 * M_PI / len_points;
@@ -31,4 +34,10 @@ void geom2d_circle_get_points(double cx, double cy, double r, G2DPoint out_point
         out_points[i].x = cx + r * cos(angle);
         out_points[i].y = cy + r * sin(angle);
     }
+}
+
+double geom2d_norm(double x, double y)
+/* Get the norm of a 2D vector */
+{
+    return sqrt(x*x + y*y);
 }

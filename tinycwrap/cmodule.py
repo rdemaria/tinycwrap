@@ -14,7 +14,6 @@ from .parsing import (
     StructField,
     StructSpec,
     base_type_from_ctype,
-    is_length_name,
     numpy_dtype_for_base_type,
     parse_functions_from_cdef,
     parse_structs_from_cdef,
@@ -160,11 +159,32 @@ class CModule:
         self._func_specs = parse_functions_from_cdef(self._cdef)
         self._struct_specs = parse_structs_from_cdef(self._cdef)
         self._attach_docs_from_source()
+        self._mark_length_params_from_contracts()
         self._create_struct_classes()
         self._create_wrappers()
 
     def _ensure_compiled(self):
         if self._needs_recompile():
+            # Reset wrapper and struct state before recompiling
+            for fname in list(self._func_specs.keys()):
+                if hasattr(self, fname):
+                    try:
+                        delattr(self, fname)
+                    except Exception:
+                        pass
+            for sname in list(self._struct_classes.keys()):
+                if hasattr(self, sname):
+                    try:
+                        delattr(self, sname)
+                    except Exception:
+                        pass
+            self._func_specs.clear()
+            self._struct_specs.clear()
+            self._struct_dtypes.clear()
+            self._struct_classes.clear()
+            self._ffi = None
+            self._lib = None
+            self._so_path = None
             self._compile_and_load()
 
     # ---------- IPython auto-reload hook ------------------------------------
@@ -235,6 +255,10 @@ class CModule:
 
         # Remove preprocessor lines to simplify
         src_wo_pp = re.sub(r"^\s*#.*$", "", src, flags=re.MULTILINE)
+        # Strip common compiler-specific noise that confuses the regex parser
+        src_wo_pp = re.sub(r"__attribute__\s*\(\([^)]*\)\)", "", src_wo_pp)
+        src_wo_pp = re.sub(r"__declspec\s*\([^)]+\)", "", src_wo_pp)
+        src_wo_pp = re.sub(r"__asm__\s*\([^)]*\)", "", src_wo_pp)
 
         # regex for function definitions
         func_def_re = re.compile(
@@ -268,10 +292,14 @@ class CModule:
             if m.group("prefix") and "static" in m.group("prefix"):
                 # ignore static functions, not exported
                 continue
+            bad_keywords = {"for", "while", "if", "else", "switch", "case", "return", "do"}
             ret = " ".join(strip_restrict_keywords(m.group("ret")).split())
-            if ret.strip().startswith(("for", "while", "if")):
+            first_ret_token = ret.strip().split()[0] if ret.strip() else ""
+            if first_ret_token in bad_keywords:
                 continue
             name = m.group("name")
+            if name in bad_keywords:
+                continue
             args = " ".join(strip_restrict_keywords(m.group("args")).split())
             proto = f"{ret} {name}({args});"
             prototypes.append(proto)
@@ -312,6 +340,57 @@ class CModule:
             doc = re.sub(r"\s+\n", "\n", doc)
             doc = re.sub(r"\n\s+", "\n", doc)
             fspec.doc = doc
+            contracts = []
+            for line in doc.splitlines():
+                if "Contract:" in line or "Post-Contract:" in line:
+                    after = line.split("Contract:", 1)[1] if "Contract:" in line else line.split("Post-Contract:",1)[1]
+                    is_post = "Post-Contract" in line
+                    for part in after.split(";"):
+                        part = part.strip()
+                        if not part:
+                            continue
+                        mlen = re.match(r"len\((\w+)\)\s*=\s*(.+)", part)
+                        if not mlen:
+                            mlen = re.match(r"(\w+)\s*=\s*(.+)", part)
+                        if mlen:
+                            target = mlen.group(1)
+                            expr = mlen.group(2).strip()
+                            contracts.append((target, expr, is_post))
+            fspec.contracts = contracts or None
+
+    def _mark_length_params_from_contracts(self):
+        """Mark length-like parameters based solely on explicit contracts."""
+        for fspec in self._func_specs.values():
+            referenced: set[str] = set()
+            if fspec.contracts:
+                for target, expr, _ in fspec.contracts:
+                    referenced.add(target)
+                    for tok in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expr):
+                        if tok == "len":
+                            continue
+                        referenced.add(tok)
+            for arg in fspec.args:
+                arg.is_length_param = False
+            for arg in fspec.args:
+                if arg.base_type in (
+                    "int",
+                    "unsigned int",
+                    "unsigned",
+                    "long",
+                    "long int",
+                    "long long",
+                    "long long int",
+                    "unsigned long",
+                    "unsigned long long",
+                    "size_t",
+                    "ssize_t",
+                ) and (not arg.is_pointer) and arg.name in referenced:
+                    arg.is_length_param = True
+            for arg in fspec.args:
+                if arg.is_length_param:
+                    arg.is_scalar = False
+                elif (not arg.is_pointer) and arg.array_len is None and not arg.is_array_in and not arg.is_array_out:
+                    arg.is_scalar = True
 
     # ---------- 4) create NumPy wrappers ------------------------------------
 
@@ -392,10 +471,6 @@ class CModule:
         struct_names = set(self._struct_specs.keys())
         struct_ptr_args = [a for a in fspec.args if a.is_pointer and a.base_type in struct_names]
         array_args = [a for a in fspec.args if (a.is_array_in or a.is_array_out) and a not in struct_ptr_args]
-        length_args = [a for a in fspec.args if a.is_length_param]
-
-        if len(length_args) > 1:
-            raise NotImplementedError(f"{fspec.name}: multiple length params not supported yet")
 
         # validate array types (skip structs, handled separately)
         for a in array_args:
@@ -465,7 +540,7 @@ class CModule:
             if a.is_array_out and a.name.lower().startswith("out"):
                 extra.append("auto if None")
             if a.is_length_param:
-                extra.append("auto from array length")
+                extra.append("auto from Contract")
             extra_txt = f" [{' '.join(extra)}]" if extra else ""
             arg_docs.append(f"{a.name} : {ctype} ({role}){extra_txt}")
 
@@ -497,203 +572,225 @@ class CModule:
             f"    cfun = getattr(_self._lib, '{fspec.name}')",
         ]
 
-        output_vars: list[str] = []
-        call_args: list[str] = []
-        array_var_names: list[str] = []
-        length_args = [a for a in fspec.args if a.is_length_param]
-        length_name = length_args[0].name if length_args else None
-        out_array_count = sum(
-            1
+        contract_map: dict[str, str] = {}
+        post_contract_map: dict[str, str] = {}
+        if getattr(fspec, 'contracts', None):
+            for target, expr, is_post in fspec.contracts:
+                if is_post:
+                    post_contract_map[target] = expr
+                else:
+                    contract_map[target] = expr
+
+        pointer_scalar_names = {
+            a.name
             for a in fspec.args
             if (
                 a.is_array_out
+                and not a.is_array_in
                 and a.array_len is None
-                and not (a.is_pointer and a.base_type in struct_names)
+                and a.base_type
+                in (
+                    "int",
+                    "unsigned int",
+                    "unsigned",
+                    "long",
+                    "long int",
+                    "long long",
+                    "long long int",
+                    "size_t",
+                    "ssize_t",
+                )
             )
-        )
+        }
+
+        def _expr_py(expr: str) -> str:
+            expr = expr.strip()
+            expr = re.sub(r"len\((\w+)\)", r"len(arr_\1)", expr)
+            for name in pointer_scalar_names:
+                expr = re.sub(rf"\b{name}\b", f"int(arr_{name}.ravel()[0])", expr)
+            return expr
+
+        call_args: list[str] = []
+        output_vars: list[str] = []
+        output_names: list[str] = []
+        pointer_scalar_outputs: list[tuple[str, str]] = []
+        pre_lines: list[str] = []
+        length_lines: list[str] = []
+        out_lines: list[str] = []
+        scalar_lines: list[str] = []
 
         for a in fspec.args:
-            if a.is_pointer and a.base_type in struct_names:
-                dtype_expr = f"_struct_dtypes['{a.base_type}']"
-                cls_expr = f"_struct_classes['{a.base_type}']"
-                if not a.is_const and a.name.lower().startswith("out") and length_name:
-                    lines += [
-                        f"    if {a.name} is None:",
-                        f"        arr_{a.name} = np.zeros(int({length_name}), dtype={dtype_expr})",
-                        f"    elif isinstance({a.name}, {cls_expr}):",
-                        f"        arr_{a.name} = {a.name}._data",
-                        "    else:",
-                        f"        arr_{a.name} = np.ascontiguousarray({a.name}, dtype={dtype_expr})",
-                    ]
-                    output_vars.append(f"arr_{a.name}")
-                else:
-                    lines += [
+            if a.is_array_in:
+                const_prefix = "const " if a.is_const else ""
+                if a.base_type in struct_names:
+                    cls_expr = f"_struct_classes['{a.base_type}']"
+                    dtype_expr = f"_struct_dtypes['{a.base_type}']"
+                    pre_lines += [
                         f"    if isinstance({a.name}, {cls_expr}):",
                         f"        arr_{a.name} = {a.name}._data",
-                        f"    elif {a.name} is None:",
-                        f"        arr_{a.name} = np.zeros((), dtype={dtype_expr})",
                         "    else:",
                         f"        arr_{a.name} = np.ascontiguousarray({a.name}, dtype={dtype_expr})",
+                        f"    ptr_{a.name} = _self._ffi.cast('{const_prefix}{a.base_type} *', _self._ffi.from_buffer(arr_{a.name}))",
                     ]
-                lines += [
-                    f"    ptr_{a.name} = _self._ffi.cast('{a.base_type} *', _self._ffi.from_buffer(arr_{a.name}))",
-                ]
+                else:
+                    dtype_expr = f"np.dtype('{np.dtype(numpy_dtype_for_base_type(a.base_type)).name}')"
+                    pre_lines += [
+                        f"    arr_{a.name} = np.ascontiguousarray({a.name}, dtype={dtype_expr})",
+                        f"    ptr_{a.name} = _self._ffi.cast('{const_prefix}{a.base_type} *', _self._ffi.from_buffer(arr_{a.name}))",
+                    ]
                 call_args.append(f"ptr_{a.name}")
-                continue
+            elif a.is_scalar and not a.is_length_param:
+                scalar_lines.append(f"    {a.name} = {a.name}")
+                call_args.append(a.name)
+            elif a.is_length_param:
+                if a.name in contract_map:
+                    expr_py = _expr_py(contract_map[a.name])
+                    length_lines += [
+                        f"    if {a.name} is None:",
+                        f"        {a.name} = int({expr_py})",
+                        f"    else:",
+                        f"        {a.name} = int({a.name})",
+                    ]
+                else:
+                    length_lines += [
+                        f"    if {a.name} is None:",
+                        f"        raise ValueError('{fspec.name}: length parameter {a.name} requires an explicit Contract')",
+                        f"    {a.name} = int({a.name})",
+                    ]
+                call_args.append(a.name)
+            else:
+                # defer outputs / pointer handling
+                call_args.append(None)  # placeholder
 
-            if a.is_array_out and a.name.lower().startswith("out"):
+        # second pass for outputs and non-const struct pointers
+        arg_call_args: list[str] = call_args.copy()
+        for idx, a in enumerate(fspec.args):
+            if a.is_array_out and not a.is_array_in:
                 if a.base_type in struct_names:
                     dtype_expr = f"_struct_dtypes['{a.base_type}']"
                 else:
                     dtype_expr = f"np.dtype('{np.dtype(numpy_dtype_for_base_type(a.base_type)).name}')"
                 ref_name = a.name[4:] if a.name.lower().startswith("out_") else None
-                lines += [
+                out_lines += [
                     f"    base_dtype = {dtype_expr}",
                     f"    if {a.name} is None:",
                 ]
-                if ref_name:
-                    lines += [
+                if a.array_len is not None:
+                    out_lines += [f"        arr_{a.name} = np.empty({int(a.array_len)}, dtype=base_dtype)"]
+                elif a.name in contract_map:
+                    expr_py = _expr_py(contract_map[a.name])
+                    out_lines += [f"        arr_{a.name} = np.empty(int({expr_py}), dtype=base_dtype)"]
+                elif ref_name:
+                    out_lines += [
                         f"        ref_arr = locals().get('arr_{ref_name}', None)",
                         "        if ref_arr is not None:",
                         f"            arr_{a.name} = np.empty_like(ref_arr, dtype=base_dtype)",
                         "        else:",
-                    ]
-                if a.array_len is not None:
-                    lines += [
-                        f"            arr_{a.name} = np.empty({int(a.array_len)}, dtype=base_dtype)",
-                    ]
-                elif length_name:
-                    alloc_len = (
-                        f"int({length_name})//{out_array_count}"
-                        if out_array_count > 1
-                        else f"int({length_name})"
-                    )
-                    lines += [
-                        f"            arr_{a.name} = np.empty({alloc_len}, dtype=base_dtype)",
+                        f"            raise ValueError('{fspec.name}: provide {a.name} or a Contract for its length')",
                     ]
                 else:
-                    lines += [
-                        f"            raise ValueError('{fspec.name}: missing length parameter for output array {a.name}')",
+                    out_lines += [
+                        f"        raise ValueError('{fspec.name}: provide {a.name} or a Contract for its length')",
                     ]
-                lines += [
+                out_lines += [
                     "    else:",
                     f"        arr_{a.name} = np.ascontiguousarray({a.name}, dtype=base_dtype)",
                     f"    ptr_{a.name} = _self._ffi.cast('{a.base_type} *', _self._ffi.from_buffer(arr_{a.name}))",
                 ]
-                call_args.append(f"ptr_{a.name}")
-                output_vars.append(f"arr_{a.name}")
-                array_var_names.append(a.name)
-            elif a.is_array_in or a.is_array_out:
-                const_prefix = "const " if a.is_const else ""
-                if a.base_type in struct_names:
-                    dtype_expr = f"_struct_dtypes['{a.base_type}']"
+                arg_call_args[idx] = f"ptr_{a.name}"
+                output_names.append(a.name)
+                if a.name in pointer_scalar_names:
+                    pointer_scalar_outputs.append((a.name, f"arr_{a.name}"))
                 else:
-                    dtype_expr = f"np.dtype('{np.dtype(numpy_dtype_for_base_type(a.base_type)).name}')"
-                lines += [
-                    f"    arr_{a.name} = np.ascontiguousarray({a.name}, dtype={dtype_expr})",
-                    f"    ptr_{a.name} = _self._ffi.cast('{const_prefix}{a.base_type} *', _self._ffi.from_buffer(arr_{a.name}))",
-                ]
-                call_args.append(f"ptr_{a.name}")
-                array_var_names.append(a.name)
+                    output_vars.append(f"arr_{a.name}")
             elif a.is_pointer and a.base_type in struct_names:
                 dtype_expr = f"_struct_dtypes['{a.base_type}']"
                 cls_expr = f"_struct_classes['{a.base_type}']"
-                if not a.is_const and a.name.lower().startswith("out"):
-                    lines += [
-                        f"    if {a.name} is None:",
-                        f"        arr_{a.name} = np.zeros((), dtype={dtype_expr})",
-                        f"    elif isinstance({a.name}, {cls_expr}):",
-                        f"        arr_{a.name} = {a.name}._data",
-                        "    else:",
-                        f"        arr_{a.name} = np.ascontiguousarray({a.name}, dtype={dtype_expr})",
-                    ]
-                else:
-                    lines += [
+                if a.is_const:
+                    out_lines += [
                         f"    if isinstance({a.name}, {cls_expr}):",
                         f"        arr_{a.name} = {a.name}._data",
                         "    else:",
                         f"        arr_{a.name} = np.ascontiguousarray({a.name}, dtype={dtype_expr})",
-                    ]
-                lines += [
-                    f"    ptr_{a.name} = _self._ffi.cast('{a.base_type} *', _self._ffi.from_buffer(arr_{a.name}))",
-                ]
-                call_args.append(f"ptr_{a.name}")
-            elif a.is_length_param:
-                # infer from naming convention if not provided
-                base_arr = None
-                if a.name.startswith("len_"):
-                    base_arr = a.name[4:]
-                elif a.name.startswith("n_"):
-                    base_arr = a.name[2:]
-                elif a.name.startswith("size_"):
-                    base_arr = a.name[5:]
-                target_arr = base_arr if base_arr in array_var_names else (array_var_names[0] if array_var_names else None)
-                if target_arr:
-                    lines += [
-                        f"    if {a.name} is None:",
-                        f"        {a.name} = len(arr_{target_arr})",
-                        f"    {a.name} = int({a.name})",
+                        f"    ptr_{a.name} = _self._ffi.cast('{a.base_type} *', _self._ffi.from_buffer(arr_{a.name}))",
                     ]
                 else:
-                    lines += [
+                    out_lines += [
                         f"    if {a.name} is None:",
-                        f"        raise ValueError('{fspec.name}: cannot infer length for {a.name}')",
-                        f"    {a.name} = int({a.name})",
                     ]
-                call_args.append(a.name)
-            elif a.is_scalar:
-                lines += [f"    {a.name} = {a.name}"]
-                call_args.append(a.name)
+                    if a.array_len is not None:
+                        out_lines += [f"        arr_{a.name} = np.zeros({int(a.array_len)}, dtype={dtype_expr})"]
+                    elif a.name in contract_map:
+                        expr_py = _expr_py(contract_map[a.name])
+                        out_lines += [f"        arr_{a.name} = np.zeros(int({expr_py}), dtype={dtype_expr})"]
+                    else:
+                        out_lines += [f"        raise ValueError('{fspec.name}: provide {a.name} or a Contract for its length')"]
+                    out_lines += [
+                        f"    elif isinstance({a.name}, {cls_expr}):",
+                        f"        arr_{a.name} = {a.name}._data",
+                        "    else:",
+                        f"        arr_{a.name} = np.ascontiguousarray({a.name}, dtype={dtype_expr})",
+                        f"    ptr_{a.name} = _self._ffi.cast('{a.base_type} *', _self._ffi.from_buffer(arr_{a.name}))",
+                    ]
+                    output_names.append(a.name)
+                    output_vars.append(f"arr_{a.name}")
+                arg_call_args[idx] = f"ptr_{a.name}"
+            elif a.is_scalar and not a.is_length_param and arg_call_args[idx] is None:
+                scalar_lines.append(f"    {a.name} = {a.name}")
+                arg_call_args[idx] = a.name
 
-        variable_arrays = [
-            a for a in fspec.args if (a.is_array_in or a.is_array_out) and a.base_type not in struct_names and a.array_len is None
-        ]
-        if variable_arrays:
-            if not length_name:
-                lines += [
-                    f"    raise ValueError('{fspec.name}: array arguments require a length parameter')"
-                ]
+        lines.extend(pre_lines)
+        lines.extend(length_lines)
+        lines.extend(out_lines)
+        lines.extend(scalar_lines)
 
         ret_type = fspec.return_ctype.strip()
-        call_expr = f"cfun({', '.join(call_args)})"
+        call_expr = f"cfun({', '.join(arg_call_args)})"
         if ret_type == "void":
-            lines += [
-                f"    {call_expr}",
-            ]
+            lines.append(f"    {call_expr}")
         else:
-            lines += [
-                f"    res = {call_expr}",
-            ]
+            lines.append(f"    res = {call_expr}")
+
+        for out_name, out_var in zip(output_names, output_vars):
+            if out_name in post_contract_map:
+                expr_py = _expr_py(post_contract_map[out_name])
+                lines.append(f"    {out_var} = {out_var}[:int({expr_py})]")
+
+        for name, arr_var in pointer_scalar_outputs:
+            lines.append(f"    scalar_{name} = int(np.asarray({arr_var}).ravel()[0])")
 
         if output_vars:
-            if length_name:
-                lines += [
-                    f"    _out_len = int({length_name})//{len(output_vars)} if {len(output_vars)}>1 else int({length_name})",
-                ]
-                for ov in output_vars:
-                    lines += [f"    {ov} = {ov}[:_out_len]"]
             if ret_type == "void":
                 if len(output_vars) == 1:
-                    lines += [
-                        f"    return {output_vars[0]}",
-                    ]
+                    ret_expr = output_vars[0]
                 else:
-                    lines += [
-                        "    return (" + ", ".join(output_vars) + ")",
-                    ]
+                    ret_expr = "(" + ", ".join(output_vars) + ")"
             else:
                 if len(output_vars) == 1:
-                    lines += [
-                        f"    return {output_vars[0]}, res",
-                    ]
+                    ret_expr = f"{output_vars[0]}, res"
                 else:
-                    lines += [
-                        "    return (" + ", ".join(output_vars) + "), res",
-                    ]
+                    ret_expr = "(" + ", ".join(output_vars) + "), res"
+            if pointer_scalar_outputs:
+                scalars = [f"scalar_{n}" for n, _ in pointer_scalar_outputs]
+                if isinstance(ret_expr, str) and ret_expr.startswith("("):
+                    ret_expr = ret_expr[:-1] + (", " if len(scalars) else "") + ", ".join(scalars) + ")"
+                else:
+                    if len(scalars) == 1:
+                        ret_expr = "(" + ret_expr + ", " + scalars[0] + ")" if ret_expr else scalars[0]
+                    else:
+                        ret_expr = "(" + ret_expr + ", " + ", ".join(scalars) + ")"
+            lines.append(f"    return {ret_expr}")
         else:
             if ret_type == "void":
                 lines.append("    return None")
             else:
-                lines.append("    return res")
+                ret_expr = "res"
+                if pointer_scalar_outputs:
+                    scalars = [f"scalar_{n}" for n, _ in pointer_scalar_outputs]
+                    if len(scalars) == 1:
+                        ret_expr = f"({ret_expr}, {scalars[0]})"
+                    else:
+                        ret_expr = f"({ret_expr}, " + ", ".join(scalars) + ")"
+                lines.append(f"    return {ret_expr}")
 
         return "\n".join(lines)

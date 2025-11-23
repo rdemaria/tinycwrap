@@ -17,7 +17,6 @@ __all__ = [
     "strip_restrict_keywords",
     "base_type_from_ctype",
     "numpy_dtype_for_base_type",
-    "is_length_name",
     "parse_functions_from_cdef",
     "parse_structs_from_cdef",
 ]
@@ -52,13 +51,6 @@ def numpy_dtype_for_base_type(base: str):
     raise TypeError(f"Unsupported C base type for NumPy mapping: {base!r}")
 
 
-def is_length_name(name: str) -> bool:
-    name = name.lower()
-    if name in ("n", "len", "length", "size"):
-        return True
-    return name.startswith("len_") or name.startswith("n_") or name.startswith("size_")
-
-
 @dataclass
 class ArgSpec:
     name: str
@@ -79,6 +71,7 @@ class FuncSpec:
     return_ctype: str
     args: list   # list[ArgSpec]
     doc: str | None = None
+    contracts: list[tuple[str, str, bool]] | None = None
 
 
 @dataclass
@@ -177,26 +170,18 @@ def _parse_functions_with_pycparser(cdef: str) -> dict[str, FuncSpec]:
                     )
                     argspecs.append(arg)
             for a in argspecs:
-                if a.array_len is None and (not a.is_pointer) and is_length_name(a.name) and a.base_type in (
-                    "int",
-                    "unsigned int",
-                    "unsigned",
-                ):
-                    a.is_length_param = True
-            for a in argspecs:
                 if a.array_len is not None:
                     if a.is_const:
                         a.is_array_in = True
                     else:
                         a.is_array_out = True
                 elif a.is_pointer:
-                    if a.is_const:
+                    if a.is_const or not (a.name and a.name.lower().startswith("out")):
                         a.is_array_in = True
                     else:
                         a.is_array_out = True
                 else:
-                    if not a.is_length_param:
-                        a.is_scalar = True
+                    a.is_scalar = True
             funcs[fname] = FuncSpec(name=fname, return_ctype=ret_ctype, args=argspecs)
     return funcs
 
@@ -273,11 +258,12 @@ def _parse_functions_regex(cdef: str) -> dict[str, FuncSpec]:
                 raw_arg = raw_arg.strip()
                 if not raw_arg:
                     continue
-                m_arg = re.match(r"(.+?)\s*([A-Za-z_]\w*)$", raw_arg)
+                m_arg = re.match(r"(.+?)\s*([A-Za-z_]\w*)(\s*\[(\d+)\])?$", raw_arg)
                 if not m_arg:
                     continue
                 ctype = m_arg.group(1).strip()
                 name = m_arg.group(2)
+                array_len = int(m_arg.group(4)) if m_arg.group(4) else None
                 is_pointer = "*" in ctype
                 is_const = "const" in ctype
                 base = base_type_from_ctype(ctype)
@@ -292,26 +278,18 @@ def _parse_functions_regex(cdef: str) -> dict[str, FuncSpec]:
                     )
                 )
         for a in argspecs:
-            if a.array_len is None and (not a.is_pointer) and is_length_name(a.name) and a.base_type in (
-                "int",
-                "unsigned int",
-                "unsigned",
-            ):
-                a.is_length_param = True
-        for a in argspecs:
             if a.array_len is not None:
                 if a.is_const:
                     a.is_array_in = True
                 else:
                     a.is_array_out = True
             elif a.is_pointer:
-                if a.is_const:
+                if a.is_const or not (a.name and a.name.lower().startswith("out")):
                     a.is_array_in = True
                 else:
                     a.is_array_out = True
             else:
-                if not a.is_length_param:
-                    a.is_scalar = True
+                a.is_scalar = True
         funcs[fname] = FuncSpec(name=fname, return_ctype=ret_ctype, args=argspecs)
     return funcs
 
