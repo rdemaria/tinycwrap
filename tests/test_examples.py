@@ -49,4 +49,24 @@ def test_struct_wrapper(cm):
 def test_struct_argument(cm):
     cp = cm.ComplexPair(real=3.0, imag=4.0)
     mag_sq = cm.complex_magnitude(cp)
-    assert mag_sq == 5.0
+    assert np.isclose(mag_sq, 5.0)
+
+
+def test_struct_array_member(cm):
+    p = cm.Particle()
+    p.pos = [1.0, 2.0, 3.0]
+    p.vel = [0.5, 0.5, 0.5]
+    np.testing.assert_allclose(p.pos, np.array([1.0, 2.0, 3.0]))
+    np.testing.assert_allclose(p.vel, np.array([0.5, 0.5, 0.5]))
+    p.pos[:] *= 2.0
+    np.testing.assert_allclose(p.pos, np.array([2.0, 4.0, 6.0]))
+
+
+def test_struct_array_argument(cm):
+    particles = cm.Particle.zeros(2)
+    particles["pos"][0] = [0.0, 0.0, 0.0]
+    particles["vel"][0] = [1.0, 0.0, 0.0]
+    particles["pos"][1] = [0.0, 0.0, 0.0]
+    particles["vel"][1] = [0.0, 2.0, 0.0]
+    ke = cm.kinetic_energy(particles, len_p=len(particles))
+    assert np.isclose(ke, 0.5 * (1.0 + 4.0))

@@ -30,8 +30,26 @@ typedef struct {
     double imag;
 } ComplexPair;
 
+typedef struct {
+    double pos[3];
+    double vel[3];
+} Particle;
+
 double complex_magnitude(const ComplexPair *z)
 /* Return sqrt(re^2 + im^2) */
 {
     return sqrt(z->real * z->real + z->imag * z->imag);
+}
+
+double kinetic_energy(const Particle *p, int len_p)
+/* Sum 0.5*|v|^2 over particles */
+{
+    double sum = 0.0;
+    for (int i = 0; i < len_p; ++i) {
+        double vx = p[i].vel[0];
+        double vy = p[i].vel[1];
+        double vz = p[i].vel[2];
+        sum += 0.5 * (vx * vx + vy * vy + vz * vz);
+    }
+    return sum;
 }

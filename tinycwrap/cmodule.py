@@ -77,6 +77,7 @@ class StructField:
     base_type: str
     is_pointer: bool
     is_const: bool
+    array_len: int | None = None
 
 
 @dataclass
@@ -144,14 +145,15 @@ class CModule:
         self._compile_options = {
             "include_dirs": list(include_dirs or []),
             "compiler": compiler,
-            "compile_args": compile_args or ["-O3", "-shared", "-fPIC"],
+            "compile_args": compile_args
+            or ["-O3", "-shared", "-fPIC", "-march=native", "-mtune=native"],
         }
-        self._auto_cdef_from_source = True
 
         self._ffi = None
         self._lib = None
         self._sig = None
         self._so_path = None
+        self._cdef: str | None = None
 
         # will be filled after parsing
         self._func_specs: dict[str, FuncSpec] = {}
@@ -159,9 +161,7 @@ class CModule:
         self._struct_dtypes: dict[str, np.dtype] = {}
         self._struct_classes: dict[str, type] = {}
         self._ipython_hook = None
-
-        # always generate cdef from C file
-        self._cdef = self._generate_cdef_from_source()
+        self._cdef: str | None = None
 
         self._ensure_compiled()
         if reload:
@@ -200,9 +200,8 @@ class CModule:
         for inc in include_dirs:
             cmd.extend(["-I", str(inc)])
 
-        # regenerate cdef if we auto-generate from source
-        if self._auto_cdef_from_source:
-            self._cdef = self._generate_cdef_from_source()
+        # regenerate cdef from source
+        self._cdef = self._generate_cdef_from_source(verbose=self._cdef is None)
 
         sources = [str(self._c_path), *(str(p) for p in self._extra_sources)]
         cmd.extend(["-o", str(so_path), *sources])
@@ -275,7 +274,7 @@ class CModule:
 
     # ---------- 1) auto-generate cdef from C source -------------------------
 
-    def _generate_cdef_from_source(self) -> str:
+    def _generate_cdef_from_source(self, verbose: bool = True) -> str:
         """
         Parse the C file and auto-generate a minimal cdef string.
 
@@ -326,6 +325,8 @@ class CModule:
                 # ignore static functions, not exported
                 continue
             ret = " ".join(_strip_restrict_keywords(m.group("ret")).split())
+            if ret.strip().startswith(("for", "while", "if")):
+                continue
             name = m.group("name")
             args = " ".join(_strip_restrict_keywords(m.group("args")).split())
             proto = f"{ret} {name}({args});"
@@ -339,8 +340,14 @@ class CModule:
             cdef_parts.extend(struct_defs)
         if prototypes:
             cdef_parts.extend(prototypes)
-        cdef = "\n".join(cdef_parts)
-        print("[CModule] Auto-generated cdef:\n" + cdef)
+        cdef_lines = []
+        for line in "\n".join(cdef_parts).splitlines():
+            if re.match(r"\s*(for|while|if)\b", line):
+                continue
+            cdef_lines.append(line)
+        cdef = "\n".join(cdef_lines)
+        if verbose:
+            print("[CModule] Auto-generated cdef:\n" + cdef)
         return cdef
 
     # ---------- 2) parse cdef -> FuncSpec/ArgSpec ---------------------------
@@ -439,22 +446,27 @@ class CModule:
     def _parse_structs_from_cdef(self, cdef: str) -> dict[str, StructSpec]:
         structs: dict[str, StructSpec] = {}
         text = _strip_restrict_keywords(cdef)
-        struct_re = re.compile(r"typedef\s+struct\s*{(?P<body>[^}]*)}\s*(?P<name>\w+)\s*;", re.DOTALL)
+        struct_re = re.compile(
+            r"typedef\s+struct\s*{(?P<body>[^}]*)}\s*(?P<name>[A-Za-z_]\w*)\s*;",
+            re.DOTALL | re.MULTILINE,
+        )
         for m in struct_re.finditer(text):
             body = m.group("body")
             name = m.group("name")
             fields: list[StructField] = []
-            for line in body.split(";"):
+            body_clean = re.sub(r"\bstruct\b", "", body)
+            for line in body_clean.split(";"):
                 line = line.strip()
                 if not line:
                     continue
                 # handle possible trailing comments
                 line = re.sub(r"/\*.*?\*/", "", line).strip()
-                m_field = re.match(r"(.+?)\s+([A-Za-z_]\w*)$", line)
+                m_field = re.match(r"(.+?)\s+([A-Za-z_]\w*)(\s*\[(\d+)\])?$", line)
                 if not m_field:
                     continue
                 raw_ctype = m_field.group(1).strip()
                 fname = m_field.group(2)
+                array_len = int(m_field.group(4)) if m_field.group(4) else None
                 is_pointer = "*" in raw_ctype
                 is_const = "const" in raw_ctype
                 base = _base_type_from_ctype(raw_ctype)
@@ -469,6 +481,7 @@ class CModule:
                         base_type=base,
                         is_pointer=is_pointer,
                         is_const=is_const,
+                        array_len=array_len,
                     )
                 )
             if fields:
@@ -513,7 +526,10 @@ class CModule:
                 dtype_fields = []
                 for f in sspec.fields:
                     base_dtype = _numpy_dtype_for_base_type(f.base_type)
-                    dtype_fields.append((f.name, base_dtype))
+                    if f.array_len:
+                        dtype_fields.append((f.name, (base_dtype, (f.array_len,))))
+                    else:
+                        dtype_fields.append((f.name, base_dtype))
                 dtype = np.dtype(dtype_fields)
             except TypeError:
                 continue
@@ -538,14 +554,24 @@ class CModule:
                     "__repr__": __repr__,
                     "__doc__": f"Python wrapper for C struct {spec.name}. Fields: {', '.join(dtype.names)}.",
                     "dtype": dtype,
+                    "zeros": staticmethod(lambda n, _dtype=dtype: np.zeros(n, dtype=_dtype)),
                 }
 
                 for fname in dtype.names:
-                    def getter(self, fname=fname):
-                        return self._data[fname].item()
+                    field_info = dtype.fields[fname][0]
+                    is_scalar = field_info.shape == ()
+                    def getter(self, fname=fname, is_scalar=is_scalar):
+                        val = self._data[fname]
+                        return val.item() if is_scalar else val
 
-                    def setter(self, value, fname=fname):
-                        self._data[fname] = value
+                    def setter(self, value, fname=fname, field_info=field_info, is_scalar=is_scalar):
+                        if is_scalar:
+                            self._data[fname] = value
+                        else:
+                            arr = np.asarray(value, dtype=field_info.base)
+                            if arr.shape != field_info.shape:
+                                arr = np.reshape(arr, field_info.shape)
+                            np.copyto(self._data[fname], arr)
 
                     namespace[fname] = property(getter, setter)
 
