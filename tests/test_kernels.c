@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <math.h>
+#include "test_kernels.h"
 
 double dot(const double *restrict x, const double *restrict y, int len_x)
 /* Return dot product between x and y */
@@ -25,16 +26,6 @@ void cross(const double *restrict a, const double *restrict b, double *restrict 
     out[2] = a[0] * b[1] - a[1] * b[0];
 }
 
-typedef struct {
-    double real;
-    double imag;
-} ComplexPair;
-
-typedef struct {
-    double pos[3];
-    double vel[3];
-} Particle;
-
 double complex_magnitude(const ComplexPair *z)
 /* Return sqrt(re^2 + im^2) */
 {
@@ -52,4 +43,29 @@ double kinetic_energy(const Particle *p, int len_p)
         sum += 0.5 * (vx * vx + vy * vy + vz * vz);
     }
     return sum;
+}
+
+
+void split_vectors(const double *restrict inp, int len_inp, double *restrict out1, double *restrict out2)
+/* Split even/odd elements of inp into out1/out2 */
+{
+    for (int i = 0; i < len_inp; ++i) {
+        if (i % 2 == 0)
+            out1[i / 2] = inp[i];
+        else
+            out2[i / 2] = inp[i];
+    }
+}
+
+void make_particles(double speed, Particle *out_p, int len_p)
+/* Fill particles with unit positions and uniform speed on x */
+{
+    for (int i = 0; i < len_p; ++i) {
+        out_p[i].pos[0] = 1.0;
+        out_p[i].pos[1] = 1.0;
+        out_p[i].pos[2] = 1.0;
+        out_p[i].vel[0] = speed;
+        out_p[i].vel[1] = 0.0;
+        out_p[i].vel[2] = 0.0;
+    }
 }

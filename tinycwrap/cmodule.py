@@ -223,7 +223,15 @@ class CModule:
         and turn them into:
             <ret> name(<args>);
         """
-        src = self._c_path.read_text(encoding="utf8")
+        src_parts = []
+        hdr = self._c_path.with_suffix(".h")
+        if hdr.exists():
+            try:
+                src_parts.append(hdr.read_text(encoding="utf8"))
+            except OSError:
+                pass
+        src_parts.append(self._c_path.read_text(encoding="utf8"))
+        src = "\n".join(src_parts)
 
         # Remove preprocessor lines to simplify
         src_wo_pp = re.sub(r"^\s*#.*$", "", src, flags=re.MULTILINE)
@@ -492,6 +500,11 @@ class CModule:
         array_var_names: list[str] = []
         length_args = [a for a in fspec.args if a.is_length_param]
         length_name = length_args[0].name if length_args else None
+        out_array_count = sum(
+            1
+            for a in fspec.args
+            if (a.is_array_out and not (a.is_pointer and a.base_type in struct_names))
+        )
 
         for a in fspec.args:
             if a.is_pointer and a.base_type in struct_names:
@@ -500,7 +513,7 @@ class CModule:
                 if not a.is_const and a.name.lower().startswith("out"):
                     lines += [
                         f"    if {a.name} is None:",
-                        f"        arr_{a.name} = np.zeros((), dtype={dtype_expr})",
+                        f"        arr_{a.name} = np.zeros((len_inp,), dtype={dtype_expr})" if a.name.startswith("out") and length_name and f"len_{a.name[4:]}" == length_name else f"        arr_{a.name} = np.zeros((), dtype={dtype_expr})",
                         f"    elif isinstance({a.name}, {cls_expr}):",
                         f"        arr_{a.name} = {a.name}._data",
                         "    else:",
@@ -535,8 +548,13 @@ class CModule:
                         "        else:",
                     ]
                 if length_name:
+                    alloc_len = (
+                        f"int({length_name})//{out_array_count}"
+                        if out_array_count > 1
+                        else f"int({length_name})"
+                    )
                     lines += [
-                        f"            arr_{a.name} = np.empty(int({length_name}), dtype=base_dtype)",
+                        f"            arr_{a.name} = np.empty({alloc_len}, dtype=base_dtype)",
                     ]
                 else:
                     lines += [
@@ -627,17 +645,30 @@ class CModule:
             ]
 
         if output_vars:
-            tuple_expr = output_vars[0] if len(output_vars) == 1 else f"({', '.join(output_vars)})"
+            if length_name:
+                lines += [
+                    f"    _out_len = int({length_name})//{len(output_vars)} if {len(output_vars)}>1 else int({length_name})",
+                ]
+                for ov in output_vars:
+                    lines += [f"    {ov} = {ov}[:_out_len]"]
             if ret_type == "void":
-                lines += [
-                    "    outputs = " + tuple_expr,
-                    "    return outputs",
-                ]
+                if len(output_vars) == 1:
+                    lines += [
+                        f"    return {output_vars[0]}",
+                    ]
+                else:
+                    lines += [
+                        "    return (" + ", ".join(output_vars) + ")",
+                    ]
             else:
-                lines += [
-                    "    outputs = " + tuple_expr,
-                    "    return outputs, res",
-                ]
+                if len(output_vars) == 1:
+                    lines += [
+                        f"    return {output_vars[0]}, res",
+                    ]
+                else:
+                    lines += [
+                        "    return (" + ", ".join(output_vars) + "), res",
+                    ]
         else:
             if ret_type == "void":
                 lines.append("    return None")

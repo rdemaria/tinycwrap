@@ -3,6 +3,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
+try:
+    from pycparser import c_parser, c_ast  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    c_parser = None
+    c_ast = None
+
 __all__ = [
     "ArgSpec",
     "FuncSpec",
@@ -90,12 +96,144 @@ class StructSpec:
 
 
 def parse_functions_from_cdef(cdef: str) -> dict[str, FuncSpec]:
+    if c_parser is not None:
+        try:
+            return _parse_functions_with_pycparser(cdef)
+        except Exception:
+            pass  # fallback to regex
+    return _parse_functions_regex(cdef)
+
+
+def parse_structs_from_cdef(cdef: str) -> dict[str, StructSpec]:
+    if c_parser is not None:
+        try:
+            return _parse_structs_with_pycparser(cdef)
+        except Exception:
+            pass  # fallback to regex
+    return _parse_structs_regex(cdef)
+
+
+# ---------- pycparser helpers -----------------------------------------------
+
+
+def _ctype_from_decl(decl) -> tuple[str, bool, bool, int | None]:
+    """
+    Return (ctype_str, is_pointer, is_const, array_len) from a pycparser decl node.
+    """
+    is_pointer = False
+    is_const = False
+    array_len = None
+    node = decl
+    if getattr(decl, "quals", None) and "const" in decl.quals:
+        is_const = True
+    while True:
+        if isinstance(node, c_ast.TypeDecl):
+            names = node.type.names if isinstance(node.type, c_ast.IdentifierType) else []
+            ctype = " ".join(names)
+            if getattr(node, "quals", None) and "const" in node.quals:
+                is_const = True
+            return ctype, is_pointer, is_const, array_len
+        if isinstance(node, c_ast.PtrDecl):
+            is_pointer = True
+            if node.quals and "const" in node.quals:
+                is_const = True
+            node = node.type
+            continue
+        if isinstance(node, c_ast.ArrayDecl):
+            dim = node.dim.value if isinstance(node.dim, c_ast.Constant) else None
+            array_len = int(dim) if dim is not None else None
+            node = node.type
+            continue
+        break
+    return "", is_pointer, is_const, array_len
+
+
+def _parse_functions_with_pycparser(cdef: str) -> dict[str, FuncSpec]:
+    parser = c_parser.CParser()
+    wrapped = f"{cdef}\n"
+    ast = parser.parse(wrapped)
+    funcs: dict[str, FuncSpec] = {}
+    for ext in ast.ext:
+        if isinstance(ext, c_ast.Decl) and isinstance(ext.type, c_ast.FuncDecl):
+            fname = ext.name
+            ret_ctype, _, _, _ = _ctype_from_decl(ext.type.type)
+            argspecs: list[ArgSpec] = []
+            args = ext.type.args
+            if args and args.params:
+                for param in args.params:
+                    if isinstance(param, c_ast.EllipsisParam):
+                        continue
+                    ctype, is_ptr, is_const, _ = _ctype_from_decl(param.type)
+                    base = base_type_from_ctype(ctype)
+                    arg = ArgSpec(
+                        name=param.name or "",
+                        raw_ctype=ctype,
+                        base_type=base,
+                        is_pointer=is_ptr,
+                        is_const=is_const,
+                    )
+                    argspecs.append(arg)
+            for a in argspecs:
+                if (not a.is_pointer) and is_length_name(a.name) and a.base_type in (
+                    "int",
+                    "unsigned int",
+                    "unsigned",
+                ):
+                    a.is_length_param = True
+            for a in argspecs:
+                if a.is_pointer:
+                    if a.is_const:
+                        a.is_array_in = True
+                    else:
+                        a.is_array_out = True
+                else:
+                    if not a.is_length_param:
+                        a.is_scalar = True
+            funcs[fname] = FuncSpec(name=fname, return_ctype=ret_ctype, args=argspecs)
+    return funcs
+
+
+def _parse_structs_with_pycparser(cdef: str) -> dict[str, StructSpec]:
+    parser = c_parser.CParser()
+    ast = parser.parse(cdef)
+    structs: dict[str, StructSpec] = {}
+    for ext in ast.ext:
+        if isinstance(ext, c_ast.Typedef) and isinstance(ext.type, c_ast.TypeDecl):
+            if isinstance(ext.type.type, c_ast.Struct):
+                struct = ext.type.type
+                if struct.decls is None:
+                    continue
+                fields: list[StructField] = []
+                for decl in struct.decls:
+                    ctype, is_ptr, is_const, arr_len = _ctype_from_decl(decl.type)
+                    base = base_type_from_ctype(ctype)
+                    try:
+                        numpy_dtype_for_base_type(base)
+                    except TypeError:
+                        continue
+                    fields.append(
+                        StructField(
+                            name=decl.name,
+                            raw_ctype=ctype,
+                            base_type=base,
+                            is_pointer=is_ptr,
+                            is_const=is_const,
+                            array_len=arr_len,
+                        )
+                    )
+                if fields:
+                    structs[ext.name] = StructSpec(name=ext.name, fields=fields)
+    return structs
+
+
+# ---------- regex fallbacks --------------------------------------------------
+
+
+def _parse_functions_regex(cdef: str) -> dict[str, FuncSpec]:
     text = cdef
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
     text = re.sub(r"//.*?$", "", text, flags=re.MULTILINE)
     text = strip_restrict_keywords(text)
-
-    # remove struct definitions for function parsing
     text = re.sub(r"typedef\s+struct\s*{[^}]*}\s*\w+\s*;", "", text, flags=re.DOTALL)
 
     decls = []
@@ -113,7 +251,6 @@ def parse_functions_from_cdef(cdef: str) -> dict[str, FuncSpec]:
     func_re = re.compile(r"(.+?)\s+(\w+)\s*\((.*?)\)\s*;")
 
     funcs: dict[str, FuncSpec] = {}
-
     for decl in decls:
         m = func_re.match(decl)
         if not m:
@@ -122,36 +259,29 @@ def parse_functions_from_cdef(cdef: str) -> dict[str, FuncSpec]:
         ret_ctype = ret_ctype.strip()
         arglist = arglist.strip()
 
-        if arglist == "void" or arglist == "":
-            argspecs = []
-        else:
-            argspecs = []
-
-        for raw_arg in re.split(r"\s*,\s*", arglist):
-            raw_arg = raw_arg.strip()
-            if not raw_arg:
-                continue
-
-            m_arg = re.match(r"(.+?)\s*([A-Za-z_]\w*)$", raw_arg)
-            if not m_arg:
-                continue
-
-            ctype = m_arg.group(1).strip()
-            name = m_arg.group(2)
-
-            is_pointer = "*" in ctype
-            is_const = "const" in ctype
-            base = base_type_from_ctype(ctype)
-
-            aspec = ArgSpec(
-                name=name,
-                raw_ctype=ctype,
-                base_type=base,
-                is_pointer=is_pointer,
-                is_const=is_const,
-            )
-            argspecs.append(aspec)
-
+        argspecs: list[ArgSpec] = []
+        if arglist and arglist != "void":
+            for raw_arg in re.split(r"\s*,\s*", arglist):
+                raw_arg = raw_arg.strip()
+                if not raw_arg:
+                    continue
+                m_arg = re.match(r"(.+?)\s*([A-Za-z_]\w*)$", raw_arg)
+                if not m_arg:
+                    continue
+                ctype = m_arg.group(1).strip()
+                name = m_arg.group(2)
+                is_pointer = "*" in ctype
+                is_const = "const" in ctype
+                base = base_type_from_ctype(ctype)
+                argspecs.append(
+                    ArgSpec(
+                        name=name,
+                        raw_ctype=ctype,
+                        base_type=base,
+                        is_pointer=is_pointer,
+                        is_const=is_const,
+                    )
+                )
         for a in argspecs:
             if (not a.is_pointer) and is_length_name(a.name) and a.base_type in (
                 "int",
@@ -159,7 +289,6 @@ def parse_functions_from_cdef(cdef: str) -> dict[str, FuncSpec]:
                 "unsigned",
             ):
                 a.is_length_param = True
-
         for a in argspecs:
             if a.is_pointer:
                 if a.is_const:
@@ -169,13 +298,11 @@ def parse_functions_from_cdef(cdef: str) -> dict[str, FuncSpec]:
             else:
                 if not a.is_length_param:
                     a.is_scalar = True
-
         funcs[fname] = FuncSpec(name=fname, return_ctype=ret_ctype, args=argspecs)
-
     return funcs
 
 
-def parse_structs_from_cdef(cdef: str) -> dict[str, StructSpec]:
+def _parse_structs_regex(cdef: str) -> dict[str, StructSpec]:
     structs: dict[str, StructSpec] = {}
     text = strip_restrict_keywords(cdef)
     struct_re = re.compile(

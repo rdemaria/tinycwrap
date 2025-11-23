@@ -70,3 +70,19 @@ def test_struct_array_argument(cm):
     particles["vel"][1] = [0.0, 2.0, 0.0]
     ke = cm.kinetic_energy(particles, len_p=len(particles))
     assert np.isclose(ke, 0.5 * (1.0 + 4.0))
+
+
+def test_two_output_arrays(cm):
+    data = np.array([0, 1, 2, 3, 4, 5], dtype=np.float64)
+    out1, out2 = cm.split_vectors(data)
+    np.testing.assert_allclose(out1, np.array([0, 2, 4], dtype=np.float64))
+    np.testing.assert_allclose(out2, np.array([1, 3, 5], dtype=np.float64))
+
+
+def test_struct_output_array(cm):
+    n = 4
+    particles = cm.Particle.zeros(n)
+    out_particles = cm.make_particles(3.0, out_p=particles, len_p=n)
+    np.testing.assert_array_equal(out_particles, particles)
+    np.testing.assert_allclose(particles["pos"], np.ones((n, 3)))
+    np.testing.assert_allclose(particles["vel"], np.array([[3.0, 0.0, 0.0]] * n))
