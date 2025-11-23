@@ -3,87 +3,23 @@ import hashlib
 import tempfile
 import subprocess
 import linecache
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from cffi import FFI
 
-
-# ---------------- helpers --------------------------------------------------
-
-
-def _strip_restrict_keywords(text: str) -> str:
-    """Remove C restrict qualifiers (including compiler-specific variants)."""
-    return re.sub(r"\b(__restrict__|__restrict|restrict)\b", "", text)
-
-
-def _base_type_from_ctype(ctype: str) -> str:
-    """Normalize base C type (strip const, *, etc.)."""
-    ctype = _strip_restrict_keywords(ctype)
-    ctype = ctype.replace("const", "").replace("volatile", "")
-    ctype = ctype.replace("*", "").strip()
-    return " ".join(ctype.split())
-
-
-def _numpy_dtype_for_base_type(base: str):
-    """Map base C type -> numpy dtype."""
-    if base == "double":
-        return np.float64
-    if base == "float":
-        return np.float32
-    if base in ("int", "signed int"):
-        return np.int32
-    if base in ("long long", "long long int", "signed long long"):
-        return np.int64
-    if base in ("unsigned int", "unsigned"):
-        return np.uint32
-    # Extend here if you need more types
-    raise TypeError(f"Unsupported C base type for NumPy mapping: {base!r}")
-
-
-def _is_length_name(name: str) -> bool:
-    name = name.lower()
-    if name in ("n", "len", "length", "size"):
-        return True
-    return name.startswith("len_") or name.startswith("n_") or name.startswith("size_")
-
-
-@dataclass
-class ArgSpec:
-    name: str
-    raw_ctype: str
-    base_type: str
-    is_pointer: bool
-    is_const: bool
-    is_length_param: bool = False
-    is_array_in: bool = False
-    is_array_out: bool = False
-    is_scalar: bool = False
-
-
-@dataclass
-class FuncSpec:
-    name: str
-    return_ctype: str
-    args: list   # list[ArgSpec]
-    doc: str | None = None
-
-
-@dataclass
-class StructField:
-    name: str
-    raw_ctype: str
-    base_type: str
-    is_pointer: bool
-    is_const: bool
-    array_len: int | None = None
-
-
-@dataclass
-class StructSpec:
-    name: str
-    fields: list[StructField]
+from .parsing import (
+    ArgSpec,
+    FuncSpec,
+    StructField,
+    StructSpec,
+    base_type_from_ctype,
+    is_length_name,
+    numpy_dtype_for_base_type,
+    parse_functions_from_cdef,
+    parse_structs_from_cdef,
+    strip_restrict_keywords,
+)
 
 
 # ---------------- main class ----------------------------------------------
@@ -221,8 +157,8 @@ class CModule:
         print(f"[CModule] Loaded {so_path}")
 
         # Re-parse cdef and attach docs from C source, then create wrappers
-        self._func_specs = self._parse_cdef(self._cdef)
-        self._struct_specs = self._parse_structs_from_cdef(self._cdef)
+        self._func_specs = parse_functions_from_cdef(self._cdef)
+        self._struct_specs = parse_structs_from_cdef(self._cdef)
         self._attach_docs_from_source()
         self._create_struct_classes()
         self._create_wrappers()
@@ -324,11 +260,11 @@ class CModule:
             if m.group("prefix") and "static" in m.group("prefix"):
                 # ignore static functions, not exported
                 continue
-            ret = " ".join(_strip_restrict_keywords(m.group("ret")).split())
+            ret = " ".join(strip_restrict_keywords(m.group("ret")).split())
             if ret.strip().startswith(("for", "while", "if")):
                 continue
             name = m.group("name")
-            args = " ".join(_strip_restrict_keywords(m.group("args")).split())
+            args = " ".join(strip_restrict_keywords(m.group("args")).split())
             proto = f"{ret} {name}({args});"
             prototypes.append(proto)
 
@@ -351,144 +287,6 @@ class CModule:
         return cdef
 
     # ---------- 2) parse cdef -> FuncSpec/ArgSpec ---------------------------
-
-    def _parse_cdef(self, cdef: str) -> dict[str, FuncSpec]:
-        text = cdef
-        text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
-        text = re.sub(r"//.*?$", "", text, flags=re.MULTILINE)
-        text = _strip_restrict_keywords(text)
-
-        # remove struct definitions for function parsing
-        text = re.sub(r"typedef\s+struct\s*{[^}]*}\s*\w+\s*;", "", text, flags=re.DOTALL)
-
-        decls = []
-        buff = []
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            buff.append(line)
-            if ";" in line:
-                decl = " ".join(buff)
-                decls.append(decl)
-                buff = []
-
-        func_re = re.compile(r"(.+?)\s+(\w+)\s*\((.*?)\)\s*;")
-
-        funcs: dict[str, FuncSpec] = {}
-
-        for decl in decls:
-            m = func_re.match(decl)
-            if not m:
-                continue
-            ret_ctype, fname, arglist = m.groups()
-            ret_ctype = ret_ctype.strip()
-            arglist = arglist.strip()
-
-            if arglist == "void" or arglist == "":
-                argspecs = []
-            else:
-                argspecs = []
-
-            for raw_arg in re.split(r"\s*,\s*", arglist):
-                raw_arg = raw_arg.strip()
-                if not raw_arg:
-                    continue
-
-                # Match: [type stuff possibly with *] [name]
-                # Handles: "const double *x", "double* x", "double * x", etc.
-                m_arg = re.match(r"(.+?)\s*([A-Za-z_]\w*)$", raw_arg)
-                if not m_arg:
-                    # couldn't parse this arg, skip or raise
-                    # raise ValueError(f"Cannot parse argument: {raw_arg!r}")
-                    continue
-
-                ctype = m_arg.group(1).strip()
-                name = m_arg.group(2)
-
-                is_pointer = "*" in ctype
-                is_const = "const" in ctype
-                base = _base_type_from_ctype(ctype)
-
-                aspec = ArgSpec(
-                    name=name,
-                    raw_ctype=ctype,
-                    base_type=base,
-                    is_pointer=is_pointer,
-                    is_const=is_const,
-                )
-                argspecs.append(aspec)
-
-
-            # classify
-            for a in argspecs:
-                if (not a.is_pointer) and _is_length_name(a.name) and a.base_type in (
-                    "int",
-                    "unsigned int",
-                    "unsigned",
-                ):
-                    a.is_length_param = True
-
-            for a in argspecs:
-                if a.is_pointer:
-                    if a.is_const:
-                        a.is_array_in = True
-                    else:
-                        a.is_array_out = True
-                else:
-                    if not a.is_length_param:
-                        a.is_scalar = True
-
-            funcs[fname] = FuncSpec(name=fname, return_ctype=ret_ctype, args=argspecs)
-
-        return funcs
-
-    def _parse_structs_from_cdef(self, cdef: str) -> dict[str, StructSpec]:
-        structs: dict[str, StructSpec] = {}
-        text = _strip_restrict_keywords(cdef)
-        struct_re = re.compile(
-            r"typedef\s+struct\s*{(?P<body>[^}]*)}\s*(?P<name>[A-Za-z_]\w*)\s*;",
-            re.DOTALL | re.MULTILINE,
-        )
-        for m in struct_re.finditer(text):
-            body = m.group("body")
-            name = m.group("name")
-            fields: list[StructField] = []
-            body_clean = re.sub(r"\bstruct\b", "", body)
-            for line in body_clean.split(";"):
-                line = line.strip()
-                if not line:
-                    continue
-                # handle possible trailing comments
-                line = re.sub(r"/\*.*?\*/", "", line).strip()
-                m_field = re.match(r"(.+?)\s+([A-Za-z_]\w*)(\s*\[(\d+)\])?$", line)
-                if not m_field:
-                    continue
-                raw_ctype = m_field.group(1).strip()
-                fname = m_field.group(2)
-                array_len = int(m_field.group(4)) if m_field.group(4) else None
-                is_pointer = "*" in raw_ctype
-                is_const = "const" in raw_ctype
-                base = _base_type_from_ctype(raw_ctype)
-                try:
-                    _numpy_dtype_for_base_type(base)
-                except TypeError:
-                    continue
-                fields.append(
-                    StructField(
-                        name=fname,
-                        raw_ctype=raw_ctype,
-                        base_type=base,
-                        is_pointer=is_pointer,
-                        is_const=is_const,
-                        array_len=array_len,
-                    )
-                )
-            if fields:
-                structs[name] = StructSpec(name=name, fields=fields)
-        return structs
-
-    # ---------- 3) attach docstrings from C comments ------------------------
 
     def _attach_docs_from_source(self):
         try:
@@ -525,7 +323,7 @@ class CModule:
             try:
                 dtype_fields = []
                 for f in sspec.fields:
-                    base_dtype = _numpy_dtype_for_base_type(f.base_type)
+                    base_dtype = numpy_dtype_for_base_type(f.base_type)
                     if f.array_len:
                         dtype_fields.append((f.name, (base_dtype, (f.array_len,))))
                     else:
@@ -593,13 +391,13 @@ class CModule:
 
         # validate array types
         for a in array_args:
-            _numpy_dtype_for_base_type(a.base_type)
+            numpy_dtype_for_base_type(a.base_type)
 
         src = self._build_wrapper_source(fspec)
         namespace = {
             "_self": self,
             "np": np,
-            "_numpy_dtype_for_base_type": _numpy_dtype_for_base_type,
+            "numpy_dtype_for_base_type": numpy_dtype_for_base_type,
             "_struct_classes": self._struct_classes,
             "_struct_dtypes": self._struct_dtypes,
         }
@@ -723,7 +521,7 @@ class CModule:
                 continue
 
             if a.is_array_out and a.name.lower().startswith("out"):
-                dtype_expr = f"np.dtype('{np.dtype(_numpy_dtype_for_base_type(a.base_type)).name}')"
+                dtype_expr = f"np.dtype('{np.dtype(numpy_dtype_for_base_type(a.base_type)).name}')"
                 ref_name = a.name[4:] if a.name.lower().startswith("out_") else None
                 lines += [
                     f"    base_dtype = {dtype_expr}",
@@ -754,7 +552,7 @@ class CModule:
                 array_var_names.append(a.name)
             elif a.is_array_in or a.is_array_out:
                 const_prefix = "const " if a.is_const else ""
-                dtype_expr = f"np.dtype('{np.dtype(_numpy_dtype_for_base_type(a.base_type)).name}')"
+                dtype_expr = f"np.dtype('{np.dtype(numpy_dtype_for_base_type(a.base_type)).name}')"
                 lines += [
                     f"    arr_{a.name} = np.ascontiguousarray({a.name}, dtype={dtype_expr})",
                     f"    ptr_{a.name} = _self._ffi.cast('{const_prefix}{a.base_type} *', _self._ffi.from_buffer(arr_{a.name}))",
