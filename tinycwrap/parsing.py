@@ -48,6 +48,7 @@ def numpy_dtype_for_base_type(base: str):
         return np.int64
     if base in ("unsigned int", "unsigned"):
         return np.uint32
+    # struct names are handled elsewhere
     raise TypeError(f"Unsupported C base type for NumPy mapping: {base!r}")
 
 
@@ -65,6 +66,7 @@ class ArgSpec:
     base_type: str
     is_pointer: bool
     is_const: bool
+    array_len: int | None = None
     is_length_param: bool = False
     is_array_in: bool = False
     is_array_out: bool = False
@@ -163,7 +165,7 @@ def _parse_functions_with_pycparser(cdef: str) -> dict[str, FuncSpec]:
                 for param in args.params:
                     if isinstance(param, c_ast.EllipsisParam):
                         continue
-                    ctype, is_ptr, is_const, _ = _ctype_from_decl(param.type)
+                    ctype, is_ptr, is_const, arr_len = _ctype_from_decl(param.type)
                     base = base_type_from_ctype(ctype)
                     arg = ArgSpec(
                         name=param.name or "",
@@ -171,17 +173,23 @@ def _parse_functions_with_pycparser(cdef: str) -> dict[str, FuncSpec]:
                         base_type=base,
                         is_pointer=is_ptr,
                         is_const=is_const,
+                        array_len=arr_len,
                     )
                     argspecs.append(arg)
             for a in argspecs:
-                if (not a.is_pointer) and is_length_name(a.name) and a.base_type in (
+                if a.array_len is None and (not a.is_pointer) and is_length_name(a.name) and a.base_type in (
                     "int",
                     "unsigned int",
                     "unsigned",
                 ):
                     a.is_length_param = True
             for a in argspecs:
-                if a.is_pointer:
+                if a.array_len is not None:
+                    if a.is_const:
+                        a.is_array_in = True
+                    else:
+                        a.is_array_out = True
+                elif a.is_pointer:
                     if a.is_const:
                         a.is_array_in = True
                     else:
@@ -280,17 +288,23 @@ def _parse_functions_regex(cdef: str) -> dict[str, FuncSpec]:
                         base_type=base,
                         is_pointer=is_pointer,
                         is_const=is_const,
+                        array_len=array_len,
                     )
                 )
         for a in argspecs:
-            if (not a.is_pointer) and is_length_name(a.name) and a.base_type in (
+            if a.array_len is None and (not a.is_pointer) and is_length_name(a.name) and a.base_type in (
                 "int",
                 "unsigned int",
                 "unsigned",
             ):
                 a.is_length_param = True
         for a in argspecs:
-            if a.is_pointer:
+            if a.array_len is not None:
+                if a.is_const:
+                    a.is_array_in = True
+                else:
+                    a.is_array_out = True
+            elif a.is_pointer:
                 if a.is_const:
                     a.is_array_in = True
                 else:
@@ -306,7 +320,7 @@ def _parse_structs_regex(cdef: str) -> dict[str, StructSpec]:
     structs: dict[str, StructSpec] = {}
     text = strip_restrict_keywords(cdef)
     struct_re = re.compile(
-        r"typedef\s+struct\s*{(?P<body>[^}]*)}\s*(?P<name>[A-Za-z_]\w*)\s*;",
+        r"typedef\s+struct\s+(?:\w+\s*)?{(?P<body>[^}]*)}\s*(?P<name>[A-Za-z_]\w*)\s*;",
         re.DOTALL | re.MULTILINE,
     )
     for m in struct_re.finditer(text):

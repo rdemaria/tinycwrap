@@ -257,7 +257,7 @@ class CModule:
         struct_defs = []
 
         struct_re = re.compile(
-            r"typedef\s+struct\s*{(?P<body>[^}]*)}\s*(?P<name>\w+)\s*;",
+            r"typedef\s+struct\s+(?:\w+\s*)?{(?P<body>[^}]*)}\s*(?P<name>\w+)\s*;",
             re.DOTALL,
         )
         for m in struct_re.finditer(src_wo_pp):
@@ -397,8 +397,10 @@ class CModule:
         if len(length_args) > 1:
             raise NotImplementedError(f"{fspec.name}: multiple length params not supported yet")
 
-        # validate array types
+        # validate array types (skip structs, handled separately)
         for a in array_args:
+            if a.base_type in struct_names:
+                continue
             numpy_dtype_for_base_type(a.base_type)
 
         src = self._build_wrapper_source(fspec)
@@ -503,17 +505,21 @@ class CModule:
         out_array_count = sum(
             1
             for a in fspec.args
-            if (a.is_array_out and not (a.is_pointer and a.base_type in struct_names))
+            if (
+                a.is_array_out
+                and a.array_len is None
+                and not (a.is_pointer and a.base_type in struct_names)
+            )
         )
 
         for a in fspec.args:
             if a.is_pointer and a.base_type in struct_names:
                 dtype_expr = f"_struct_dtypes['{a.base_type}']"
                 cls_expr = f"_struct_classes['{a.base_type}']"
-                if not a.is_const and a.name.lower().startswith("out"):
+                if not a.is_const and a.name.lower().startswith("out") and length_name:
                     lines += [
                         f"    if {a.name} is None:",
-                        f"        arr_{a.name} = np.zeros((len_inp,), dtype={dtype_expr})" if a.name.startswith("out") and length_name and f"len_{a.name[4:]}" == length_name else f"        arr_{a.name} = np.zeros((), dtype={dtype_expr})",
+                        f"        arr_{a.name} = np.zeros(int({length_name}), dtype={dtype_expr})",
                         f"    elif isinstance({a.name}, {cls_expr}):",
                         f"        arr_{a.name} = {a.name}._data",
                         "    else:",
@@ -524,6 +530,8 @@ class CModule:
                     lines += [
                         f"    if isinstance({a.name}, {cls_expr}):",
                         f"        arr_{a.name} = {a.name}._data",
+                        f"    elif {a.name} is None:",
+                        f"        arr_{a.name} = np.zeros((), dtype={dtype_expr})",
                         "    else:",
                         f"        arr_{a.name} = np.ascontiguousarray({a.name}, dtype={dtype_expr})",
                     ]
@@ -534,7 +542,10 @@ class CModule:
                 continue
 
             if a.is_array_out and a.name.lower().startswith("out"):
-                dtype_expr = f"np.dtype('{np.dtype(numpy_dtype_for_base_type(a.base_type)).name}')"
+                if a.base_type in struct_names:
+                    dtype_expr = f"_struct_dtypes['{a.base_type}']"
+                else:
+                    dtype_expr = f"np.dtype('{np.dtype(numpy_dtype_for_base_type(a.base_type)).name}')"
                 ref_name = a.name[4:] if a.name.lower().startswith("out_") else None
                 lines += [
                     f"    base_dtype = {dtype_expr}",
@@ -547,7 +558,11 @@ class CModule:
                         f"            arr_{a.name} = np.empty_like(ref_arr, dtype=base_dtype)",
                         "        else:",
                     ]
-                if length_name:
+                if a.array_len is not None:
+                    lines += [
+                        f"            arr_{a.name} = np.empty({int(a.array_len)}, dtype=base_dtype)",
+                    ]
+                elif length_name:
                     alloc_len = (
                         f"int({length_name})//{out_array_count}"
                         if out_array_count > 1
@@ -570,7 +585,10 @@ class CModule:
                 array_var_names.append(a.name)
             elif a.is_array_in or a.is_array_out:
                 const_prefix = "const " if a.is_const else ""
-                dtype_expr = f"np.dtype('{np.dtype(numpy_dtype_for_base_type(a.base_type)).name}')"
+                if a.base_type in struct_names:
+                    dtype_expr = f"_struct_dtypes['{a.base_type}']"
+                else:
+                    dtype_expr = f"np.dtype('{np.dtype(numpy_dtype_for_base_type(a.base_type)).name}')"
                 lines += [
                     f"    arr_{a.name} = np.ascontiguousarray({a.name}, dtype={dtype_expr})",
                     f"    ptr_{a.name} = _self._ffi.cast('{const_prefix}{a.base_type} *', _self._ffi.from_buffer(arr_{a.name}))",
@@ -627,7 +645,10 @@ class CModule:
                 lines += [f"    {a.name} = {a.name}"]
                 call_args.append(a.name)
 
-        if any((a.is_array_in or a.is_array_out) and a.base_type not in struct_names for a in fspec.args):
+        variable_arrays = [
+            a for a in fspec.args if (a.is_array_in or a.is_array_out) and a.base_type not in struct_names and a.array_len is None
+        ]
+        if variable_arrays:
             if not length_name:
                 lines += [
                     f"    raise ValueError('{fspec.name}: array arguments require a length parameter')"
