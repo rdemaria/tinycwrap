@@ -9,11 +9,8 @@ import numpy as np
 from cffi import FFI
 
 from .parsing import (
-    ArgSpec,
     FuncSpec,
-    StructField,
     StructSpec,
-    base_type_from_ctype,
     numpy_dtype_for_base_type,
     parse_functions_from_cdef,
     parse_structs_from_cdef,
@@ -129,7 +126,10 @@ class CModule:
         so_name = f"cmodule_{self._c_path.stem}_{sig}.so"
         so_path = build_dir / so_name
 
-        cmd = [self._compile_options["compiler"], *self._compile_options["compile_args"]]
+        cmd = [
+            self._compile_options["compiler"],
+            *self._compile_options["compile_args"],
+        ]
 
         include_dirs = self._compile_options["include_dirs"] + [np.get_include()]
         for inc in include_dirs:
@@ -243,14 +243,18 @@ class CModule:
         and turn them into:
             <ret> name(<args>);
         """
-        src_parts = []
-        hdr = self._c_path.with_suffix(".h")
-        if hdr.exists():
+        src_parts: list[str] = []
+        for path in [self._c_path, *self._extra_sources]:
+            hdr = path.with_suffix(".h")
+            if hdr.exists():
+                try:
+                    src_parts.append(hdr.read_text(encoding="utf8"))
+                except OSError:
+                    pass
             try:
-                src_parts.append(hdr.read_text(encoding="utf8"))
+                src_parts.append(path.read_text(encoding="utf8"))
             except OSError:
-                pass
-        src_parts.append(self._c_path.read_text(encoding="utf8"))
+                continue
         src = "\n".join(src_parts)
 
         # Remove preprocessor lines to simplify
@@ -288,11 +292,21 @@ class CModule:
             struct_text = m.group(0)
             struct_defs.append(struct_text.strip())
 
+        proto_set = set()
         for m in func_def_re.finditer(src_wo_pp):
             if m.group("prefix") and "static" in m.group("prefix"):
                 # ignore static functions, not exported
                 continue
-            bad_keywords = {"for", "while", "if", "else", "switch", "case", "return", "do"}
+            bad_keywords = {
+                "for",
+                "while",
+                "if",
+                "else",
+                "switch",
+                "case",
+                "return",
+                "do",
+            }
             ret = " ".join(strip_restrict_keywords(m.group("ret")).split())
             first_ret_token = ret.strip().split()[0] if ret.strip() else ""
             if first_ret_token in bad_keywords:
@@ -302,7 +316,9 @@ class CModule:
                 continue
             args = " ".join(strip_restrict_keywords(m.group("args")).split())
             proto = f"{ret} {name}({args});"
-            prototypes.append(proto)
+            if proto not in proto_set:
+                prototypes.append(proto)
+                proto_set.add(proto)
 
         if not prototypes and not struct_defs:
             raise RuntimeError(f"No functions found in {self._c_path} to generate cdef")
@@ -343,7 +359,11 @@ class CModule:
             contracts = []
             for line in doc.splitlines():
                 if "Contract:" in line or "Post-Contract:" in line:
-                    after = line.split("Contract:", 1)[1] if "Contract:" in line else line.split("Post-Contract:",1)[1]
+                    after = (
+                        line.split("Contract:", 1)[1]
+                        if "Contract:" in line
+                        else line.split("Post-Contract:", 1)[1]
+                    )
                     is_post = "Post-Contract" in line
                     for part in after.split(";"):
                         part = part.strip()
@@ -372,24 +392,34 @@ class CModule:
             for arg in fspec.args:
                 arg.is_length_param = False
             for arg in fspec.args:
-                if arg.base_type in (
-                    "int",
-                    "unsigned int",
-                    "unsigned",
-                    "long",
-                    "long int",
-                    "long long",
-                    "long long int",
-                    "unsigned long",
-                    "unsigned long long",
-                    "size_t",
-                    "ssize_t",
-                ) and (not arg.is_pointer) and arg.name in referenced:
+                if (
+                    arg.base_type
+                    in (
+                        "int",
+                        "unsigned int",
+                        "unsigned",
+                        "long",
+                        "long int",
+                        "long long",
+                        "long long int",
+                        "unsigned long",
+                        "unsigned long long",
+                        "size_t",
+                        "ssize_t",
+                    )
+                    and (not arg.is_pointer)
+                    and arg.name in referenced
+                ):
                     arg.is_length_param = True
             for arg in fspec.args:
                 if arg.is_length_param:
                     arg.is_scalar = False
-                elif (not arg.is_pointer) and arg.array_len is None and not arg.is_array_in and not arg.is_array_out:
+                elif (
+                    (not arg.is_pointer)
+                    and arg.array_len is None
+                    and not arg.is_array_in
+                    and not arg.is_array_out
+                ):
                     arg.is_scalar = True
 
     # ---------- 4) create NumPy wrappers ------------------------------------
@@ -430,7 +460,9 @@ class CModule:
                     object.__setattr__(self, "_data", data)
 
                 def __repr__(self):
-                    parts = ", ".join(f"{name}={self._data[name].item()!r}" for name in dtype.names)
+                    parts = ", ".join(
+                        f"{name}={self._data[name].item()!r}" for name in dtype.names
+                    )
                     return f"{spec.name}({parts})"
 
                 namespace = {
@@ -439,17 +471,26 @@ class CModule:
                     "__repr__": __repr__,
                     "__doc__": f"Python wrapper for C struct {spec.name}. Fields: {', '.join(dtype.names)}.",
                     "dtype": dtype,
-                    "zeros": staticmethod(lambda n, _dtype=dtype: np.zeros(n, dtype=_dtype)),
+                    "zeros": staticmethod(
+                        lambda n, _dtype=dtype: np.zeros(n, dtype=_dtype)
+                    ),
                 }
 
                 for fname in dtype.names:
                     field_info = dtype.fields[fname][0]
                     is_scalar = field_info.shape == ()
+
                     def getter(self, fname=fname, is_scalar=is_scalar):
                         val = self._data[fname]
                         return val.item() if is_scalar else val
 
-                    def setter(self, value, fname=fname, field_info=field_info, is_scalar=is_scalar):
+                    def setter(
+                        self,
+                        value,
+                        fname=fname,
+                        field_info=field_info,
+                        is_scalar=is_scalar,
+                    ):
                         if is_scalar:
                             self._data[fname] = value
                         else:
@@ -469,8 +510,14 @@ class CModule:
 
     def _make_wrapper_from_spec(self, fspec: FuncSpec):
         struct_names = set(self._struct_specs.keys())
-        struct_ptr_args = [a for a in fspec.args if a.is_pointer and a.base_type in struct_names]
-        array_args = [a for a in fspec.args if (a.is_array_in or a.is_array_out) and a not in struct_ptr_args]
+        struct_ptr_args = [
+            a for a in fspec.args if a.is_pointer and a.base_type in struct_names
+        ]
+        array_args = [
+            a
+            for a in fspec.args
+            if (a.is_array_in or a.is_array_out) and a not in struct_ptr_args
+        ]
 
         # validate array types (skip structs, handled separately)
         for a in array_args:
@@ -515,16 +562,23 @@ class CModule:
 
         struct_names = set(self._struct_specs.keys())
         params: list[str] = []
+        len_params: list[str] = []
         for a in fspec.args:
             if a.is_array_out and a.name.lower().startswith("out"):
                 params.append(f"{a.name}=None")
             elif a.is_length_param:
-                params.append(f"{a.name}=None")
-            elif a.is_pointer and a.base_type in struct_names and not a.is_const and a.name.lower().startswith("out"):
+                len_params.append(f"{a.name}=None")
+            elif (
+                a.is_pointer
+                and a.base_type in struct_names
+                and not a.is_const
+                and a.name.lower().startswith("out")
+            ):
                 params.append(f"{a.name}=None")
             else:
                 params.append(a.name)
 
+        params.extend(len_params)
         signature = ", ".join(params)
         arg_docs: list[str] = []
         for a in fspec.args:
@@ -574,7 +628,7 @@ class CModule:
 
         contract_map: dict[str, str] = {}
         post_contract_map: dict[str, str] = {}
-        if getattr(fspec, 'contracts', None):
+        if getattr(fspec, "contracts", None):
             for target, expr, is_post in fspec.contracts:
                 if is_post:
                     post_contract_map[target] = expr
@@ -676,10 +730,14 @@ class CModule:
                     f"    if {a.name} is None:",
                 ]
                 if a.array_len is not None:
-                    out_lines += [f"        arr_{a.name} = np.empty({int(a.array_len)}, dtype=base_dtype)"]
+                    out_lines += [
+                        f"        arr_{a.name} = np.empty({int(a.array_len)}, dtype=base_dtype)"
+                    ]
                 elif a.name in contract_map:
                     expr_py = _expr_py(contract_map[a.name])
-                    out_lines += [f"        arr_{a.name} = np.empty(int({expr_py}), dtype=base_dtype)"]
+                    out_lines += [
+                        f"        arr_{a.name} = np.empty(int({expr_py}), dtype=base_dtype)"
+                    ]
                 elif ref_name:
                     out_lines += [
                         f"        ref_arr = locals().get('arr_{ref_name}', None)",
@@ -719,12 +777,18 @@ class CModule:
                         f"    if {a.name} is None:",
                     ]
                     if a.array_len is not None:
-                        out_lines += [f"        arr_{a.name} = np.zeros({int(a.array_len)}, dtype={dtype_expr})"]
+                        out_lines += [
+                            f"        arr_{a.name} = np.zeros({int(a.array_len)}, dtype={dtype_expr})"
+                        ]
                     elif a.name in contract_map:
                         expr_py = _expr_py(contract_map[a.name])
-                        out_lines += [f"        arr_{a.name} = np.zeros(int({expr_py}), dtype={dtype_expr})"]
+                        out_lines += [
+                            f"        arr_{a.name} = np.zeros(int({expr_py}), dtype={dtype_expr})"
+                        ]
                     else:
-                        out_lines += [f"        raise ValueError('{fspec.name}: provide {a.name} or a Contract for its length')"]
+                        out_lines += [
+                            f"        raise ValueError('{fspec.name}: provide {a.name} or a Contract for its length')"
+                        ]
                     out_lines += [
                         f"    elif isinstance({a.name}, {cls_expr}):",
                         f"        arr_{a.name} = {a.name}._data",
@@ -773,10 +837,19 @@ class CModule:
             if pointer_scalar_outputs:
                 scalars = [f"scalar_{n}" for n, _ in pointer_scalar_outputs]
                 if isinstance(ret_expr, str) and ret_expr.startswith("("):
-                    ret_expr = ret_expr[:-1] + (", " if len(scalars) else "") + ", ".join(scalars) + ")"
+                    ret_expr = (
+                        ret_expr[:-1]
+                        + (", " if len(scalars) else "")
+                        + ", ".join(scalars)
+                        + ")"
+                    )
                 else:
                     if len(scalars) == 1:
-                        ret_expr = "(" + ret_expr + ", " + scalars[0] + ")" if ret_expr else scalars[0]
+                        ret_expr = (
+                            "(" + ret_expr + ", " + scalars[0] + ")"
+                            if ret_expr
+                            else scalars[0]
+                        )
                     else:
                         ret_expr = "(" + ret_expr + ", " + ", ".join(scalars) + ")"
             lines.append(f"    return {ret_expr}")

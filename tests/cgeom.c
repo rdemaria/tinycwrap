@@ -5,6 +5,10 @@
 
 #include "cgeom.h"
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 void geom2d_circle_get_n_points(double cx, double cy, double r, int len_points, G2DPoint *out_points)
 /* Get n points on the circumference of a circle */
 {
