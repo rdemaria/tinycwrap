@@ -688,11 +688,27 @@ class CModule:
             )
         }
 
+        func_names = set(self._func_specs.keys())
+
         def _expr_py(expr: str) -> str:
             expr = expr.strip()
             expr = re.sub(r"len\((\w+)\)", r"len(arr_\1)", expr)
             for name in pointer_scalar_names:
                 expr = re.sub(rf"\b{name}\b", f"int(arr_{name}.ravel()[0])", expr)
+            if func_names:
+                pattern = r"\b(" + "|".join(re.escape(n) for n in func_names) + r")\s*\(([^()]*)\)"
+
+                def _repl(m):
+                    fname = m.group(1)
+                    spec = self._func_specs.get(fname)
+                    if not spec:
+                        return m.group(0)
+                    call_parts = []
+                    for arg in spec.args:
+                        call_parts.append(f"{arg.name}={arg.name}")
+                    return f"_self.{fname}(" + ", ".join(call_parts) + ")"
+
+                expr = re.sub(pattern, _repl, expr)
             return expr
 
         call_args: list[str] = []
