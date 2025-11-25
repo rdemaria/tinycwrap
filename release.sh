@@ -49,12 +49,22 @@ else:
 new_ver = f"{major}.{minor}.{patch}"
 
 text = pyproj.read_text()
-text = re.sub(r'(?m)^version\s*=\s*"[^\"]+"', f'version = "{new_ver}"', text)
+text = re.sub(
+    r'(?m)^version\s*=\s*"[^\"]+"',
+    lambda _m: f'version = "{new_ver}"',
+    text,
+    count=1,
+)
 pyproj.write_text(text)
 
 init_py = pathlib.Path("tinycwrap/__init__.py")
 init_text = init_py.read_text()
-init_text = re.sub(r'(__version__\s*=\s*")[^"]+(")', rf'\1{new_ver}\2', init_text, count=1)
+init_text = re.sub(
+    r'(__version__\s*=\s*")[^"]+(")',
+    lambda m: f'{m.group(1)}{new_ver}{m.group(2)}',
+    init_text,
+    count=1,
+)
 init_py.write_text(init_text)
 
 print(new_ver)
