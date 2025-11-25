@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import numpy as np
+
 from tinycwrap import CModule
 import pytest
 
@@ -25,3 +27,17 @@ def test_circle_points_length_contract(cg):
     assert pts.shape == (101,)
 
 
+def test_return_struct_array_member(cg):
+    seg = cg.G2DSegment()
+    seg.type = 1
+    seg.data = [0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0]
+    assert seg.type == 1
+    np.testing.assert_allclose(seg.data, [0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0])
+
+def test_geom2d_return_strct(cg):
+    seg = cg.geom2d_line_segment_from_start_length(0.1, 0.2, 0.5, 0.4, 0.3)
+    assert seg.type == 0
+    assert seg.data[0] == 0.1
+    assert seg.data[1] == 0.2
+    assert np.isclose(seg.data[2], 0.1+0.3*0.5)
+    assert np.isclose(seg.data[3], 0.2+0.4*0.3)

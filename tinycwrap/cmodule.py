@@ -445,7 +445,7 @@ class CModule:
                         dtype_fields.append((f.name, (base_dtype, (f.array_len,))))
                     else:
                         dtype_fields.append((f.name, base_dtype))
-                dtype = np.dtype(dtype_fields)
+                dtype = np.dtype(dtype_fields, align=True)
             except TypeError:
                 continue
 
@@ -460,9 +460,14 @@ class CModule:
                     object.__setattr__(self, "_data", data)
 
                 def __repr__(self):
-                    parts = ", ".join(
-                        f"{name}={self._data[name].item()!r}" for name in dtype.names
-                    )
+                    parts_list = []
+                    for name in dtype.names:
+                        val = self._data[name]
+                        if val.shape == ():
+                            parts_list.append(f"{name}={val.item()!r}")
+                        else:
+                            parts_list.append(f"{name}={val.tolist()!r}")
+                    parts = ", ".join(parts_list)
                     return f"{spec.name}({parts})"
 
                 namespace = {
@@ -668,6 +673,7 @@ class CModule:
         output_vars: list[str] = []
         output_names: list[str] = []
         pointer_scalar_outputs: list[tuple[str, str]] = []
+        struct_scalar_outputs: list[tuple[str, str, str]] = []
         pre_lines: list[str] = []
         length_lines: list[str] = []
         out_lines: list[str] = []
@@ -688,10 +694,19 @@ class CModule:
                     ]
                 else:
                     dtype_expr = f"np.dtype('{np.dtype(numpy_dtype_for_base_type(a.base_type)).name}')"
-                    pre_lines += [
-                        f"    arr_{a.name} = np.ascontiguousarray({a.name}, dtype={dtype_expr})",
-                        f"    ptr_{a.name} = _self._ffi.cast('{const_prefix}{a.base_type} *', _self._ffi.from_buffer(arr_{a.name}))",
-                    ]
+                    if (a.array_len is None) and (a.name not in contract_map):
+                        pre_lines += [
+                            f"    if np.ndim({a.name}) == 0:",
+                            f"        arr_{a.name} = np.ascontiguousarray(np.array({a.name}, dtype={dtype_expr}))",
+                            "    else:",
+                            f"        arr_{a.name} = np.ascontiguousarray({a.name}, dtype={dtype_expr})",
+                            f"    ptr_{a.name} = _self._ffi.cast('{const_prefix}{a.base_type} *', _self._ffi.from_buffer(arr_{a.name}))",
+                        ]
+                    else:
+                        pre_lines += [
+                            f"    arr_{a.name} = np.ascontiguousarray({a.name}, dtype={dtype_expr})",
+                            f"    ptr_{a.name} = _self._ffi.cast('{const_prefix}{a.base_type} *', _self._ffi.from_buffer(arr_{a.name}))",
+                        ]
                 call_args.append(f"ptr_{a.name}")
             elif a.is_scalar and not a.is_length_param:
                 scalar_lines.append(f"    {a.name} = {a.name}")
@@ -738,6 +753,10 @@ class CModule:
                     out_lines += [
                         f"        arr_{a.name} = np.empty(int({expr_py}), dtype=base_dtype)"
                     ]
+                elif a.array_len is None and a.name not in contract_map:
+                    out_lines += [
+                        f"        arr_{a.name} = np.zeros((), dtype=base_dtype)"
+                    ]
                 elif ref_name:
                     out_lines += [
                         f"        ref_arr = locals().get('arr_{ref_name}', None)",
@@ -761,6 +780,16 @@ class CModule:
                     pointer_scalar_outputs.append((a.name, f"arr_{a.name}"))
                 else:
                     output_vars.append(f"arr_{a.name}")
+                    if (
+                        a.base_type in struct_names
+                        and a.array_len is None
+                        and a.name not in contract_map
+                        and ref_name is None
+                        and not a.is_array_in
+                    ):
+                        struct_scalar_outputs.append(
+                            (a.name, f"arr_{a.name}", f"_struct_classes['{a.base_type}']")
+                        )
             elif a.is_pointer and a.base_type in struct_names:
                 dtype_expr = f"_struct_dtypes['{a.base_type}']"
                 cls_expr = f"_struct_classes['{a.base_type}']"
@@ -784,6 +813,10 @@ class CModule:
                         expr_py = _expr_py(contract_map[a.name])
                         out_lines += [
                             f"        arr_{a.name} = np.zeros(int({expr_py}), dtype={dtype_expr})"
+                        ]
+                    elif a.array_len is None and a.name not in contract_map:
+                        out_lines += [
+                            f"        arr_{a.name} = np.zeros((), dtype={dtype_expr})"
                         ]
                     else:
                         out_lines += [
@@ -823,17 +856,29 @@ class CModule:
         for name, arr_var in pointer_scalar_outputs:
             lines.append(f"    scalar_{name} = int(np.asarray({arr_var}).ravel()[0])")
 
-        if output_vars:
-            if ret_type == "void":
-                if len(output_vars) == 1:
-                    ret_expr = output_vars[0]
-                else:
-                    ret_expr = "(" + ", ".join(output_vars) + ")"
+        struct_scalar_map = {arr: (name, cls_expr) for name, arr, cls_expr in struct_scalar_outputs}
+        for name, arr_var, cls_expr in struct_scalar_outputs:
+            lines.append(f"    obj_{name} = {cls_expr}()")
+            lines.append(f"    object.__setattr__(obj_{name}, '_data', np.array({arr_var}, copy=True))")
+        output_vars_final: list[str] = []
+        for ov in output_vars:
+            if ov in struct_scalar_map:
+                n, _ = struct_scalar_map[ov]
+                output_vars_final.append(f"obj_{n}")
             else:
-                if len(output_vars) == 1:
-                    ret_expr = f"{output_vars[0]}, res"
+                output_vars_final.append(ov)
+
+        if output_vars_final:
+            if ret_type == "void":
+                if len(output_vars_final) == 1:
+                    ret_expr = output_vars_final[0]
                 else:
-                    ret_expr = "(" + ", ".join(output_vars) + "), res"
+                    ret_expr = "(" + ", ".join(output_vars_final) + ")"
+            else:
+                if len(output_vars_final) == 1:
+                    ret_expr = f"{output_vars_final[0]}, res"
+                else:
+                    ret_expr = "(" + ", ".join(output_vars_final) + "), res"
             if pointer_scalar_outputs:
                 scalars = [f"scalar_{n}" for n, _ in pointer_scalar_outputs]
                 if isinstance(ret_expr, str) and ret_expr.startswith("("):

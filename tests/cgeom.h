@@ -8,4 +8,11 @@ typedef struct G2DPoint {
     double y;
 } G2DPoint;
 
+
+typedef struct {
+    int type; /* 0=line, 1=arc */
+    double data[8]; 
+} G2DSegment;
+
+
 #endif /* CGEOM_C */
