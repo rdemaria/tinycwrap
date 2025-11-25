@@ -53,6 +53,7 @@ class CModule:
         compiler="gcc",
         compile_args=None,
         reload=True,
+        verbose=False,
     ):
         """
         Parameters
@@ -69,6 +70,8 @@ class CModule:
         reload : bool, default True
             If True and running inside IPython, register a pre-run-cell hook to auto-recompile
             when the C source changes.
+        verbose : bool, default False
+            If True, print compilation and parsing details.
         """
         if not c_sources:
             raise ValueError("At least one C source path is required")
@@ -80,6 +83,7 @@ class CModule:
             "compile_args": compile_args
             or ["-O3", "-shared", "-fPIC", "-march=native", "-mtune=native"],
         }
+        self._verbose = verbose
 
         self._ffi = None
         self._lib = None
@@ -136,12 +140,13 @@ class CModule:
             cmd.extend(["-I", str(inc)])
 
         # regenerate cdef from source
-        self._cdef = self._generate_cdef_from_source(verbose=self._cdef is None)
+        self._cdef = self._generate_cdef_from_source(verbose=self._verbose)
 
         sources = [str(self._c_path), *(str(p) for p in self._extra_sources)]
         cmd.extend(["-o", str(so_path), *sources])
 
-        print(f"[CModule] Compiling: {' '.join(cmd)}")
+        if self._verbose:
+            print(f"[CModule] Compiling: {' '.join(cmd)}")
         subprocess.run(cmd, check=True)
 
         ffi = FFI()
@@ -153,7 +158,8 @@ class CModule:
         self._sig = sig
         self._so_path = so_path
 
-        print(f"[CModule] Loaded {so_path}")
+        if self._verbose:
+            print(f"[CModule] Loaded {so_path}")
 
         # Re-parse cdef and attach docs from C source, then create wrappers
         self._func_specs = parse_functions_from_cdef(self._cdef)
@@ -202,7 +208,7 @@ class CModule:
                 for target, expr, is_post in spec.contracts:
                     prefix = "Post-Contract" if is_post else "Contract"
                     lines.append(f"    {prefix}: {target} = {expr}")
-        return "\n".join(lines)
+        print("\n".join(lines))
 
     # ---------- IPython auto-reload hook ------------------------------------
 
@@ -247,7 +253,7 @@ class CModule:
 
     # ---------- 1) auto-generate cdef from C source -------------------------
 
-    def _generate_cdef_from_source(self, verbose: bool = True) -> str:
+    def _generate_cdef_from_source(self, verbose: bool | None = None) -> str:
         """
         Parse the C file and auto-generate a minimal cdef string.
 
@@ -351,7 +357,8 @@ class CModule:
                 continue
             cdef_lines.append(line)
         cdef = "\n".join(cdef_lines)
-        if verbose:
+        show = self._verbose if verbose is None else verbose
+        if show:
             print("[CModule] Auto-generated cdef:\n" + cdef)
         return cdef
 
@@ -363,8 +370,8 @@ class CModule:
             return
 
         for fname, fspec in self._func_specs.items():
-            # we look for: name ( ... ) /* ... */
-            pattern = rf"{re.escape(fname)}\s*\([^{{;]*\)\s*/\*(.*?)\*/"
+            # we look for: name ( ... ) [optional brace] /* ... */
+            pattern = rf"{re.escape(fname)}\s*\([^{{;]*\)\s*\{{?\s*/\*(.*?)\*/"
             m = re.search(pattern, src, flags=re.DOTALL)
             if not m:
                 continue

@@ -46,3 +46,9 @@ def test_geom2d_return_strct(cg):
 def test_geom2d_return_strct_array_member(cg):
     seg = cg.geom2d_rectangle_to_path(1,2)
     assert len(seg) == 4
+
+
+def test_docstring_contains_contract(cg):
+    doc = cg.geom2d_rectangle_to_path.__doc__
+    assert "Contract: len(out_segments)=4" in doc
+    assert "Auto-wrapped C function `geom2d_rectangle_to_path`." in doc
