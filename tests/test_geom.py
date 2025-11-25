@@ -41,3 +41,8 @@ def test_geom2d_return_strct(cg):
     assert seg.data[1] == 0.2
     assert np.isclose(seg.data[2], 0.1+0.3*0.5)
     assert np.isclose(seg.data[3], 0.2+0.4*0.3)
+
+
+def test_geom2d_return_strct_array_member(cg):
+    seg = cg.geom2d_rectangle_to_path(1,2)
+    assert len(seg) == 4

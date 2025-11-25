@@ -187,6 +187,23 @@ class CModule:
             self._so_path = None
             self._compile_and_load()
 
+    def _debug_specs(self):
+        """Return a pretty string of parsed function specs and contracts (for debugging)."""
+        lines: list[str] = []
+        for name, spec in self._func_specs.items():
+            arg_lines = [f"    {a.raw_ctype} {a.name}" for a in spec.args]
+            if arg_lines:
+                lines.append(f"{name}")
+                lines.extend(arg_lines)
+                lines.append(f"    -> {spec.return_ctype}")
+            else:
+                lines.append(f"{name}() -> {spec.return_ctype}")
+            if spec.contracts:
+                for target, expr, is_post in spec.contracts:
+                    prefix = "Post-Contract" if is_post else "Contract"
+                    lines.append(f"    {prefix}: {target} = {expr}")
+        return "\n".join(lines)
+
     # ---------- IPython auto-reload hook ------------------------------------
 
     def _register_ipython_autoreload(self):
@@ -341,9 +358,8 @@ class CModule:
     # ---------- 2) parse cdef -> FuncSpec/ArgSpec ---------------------------
 
     def _attach_docs_from_source(self):
-        try:
-            src = self._c_path.read_text(encoding="utf8")
-        except OSError:
+        src = self._combined_source()
+        if not src:
             return
 
         for fname, fspec in self._func_specs.items():
@@ -550,7 +566,7 @@ class CModule:
         wrapper = namespace[fspec.name]
         wrapper.__source__ = src
         try:
-            wrapper.__c_source__ = self._c_path.read_text(encoding="utf8")
+            wrapper.__c_source__ = self._function_source(fspec.name) or self._combined_source()
         except OSError:
             wrapper.__c_source__ = None
         return wrapper
@@ -560,10 +576,13 @@ class CModule:
         Build the Python source string for a wrapper with an explicit signature.
         Keeping this separate allows inspection/debugging of the generated code.
         """
-        try:
-            c_source_text = self._c_path.read_text(encoding="utf8")
-        except OSError:
-            c_source_text = None
+        src_parts: list[str] = []
+        func_text = self._function_source(fspec.name)
+        if func_text:
+            c_source_text = func_text
+        else:
+            combined = self._combined_source()
+            c_source_text = combined if combined else None
 
         struct_names = set(self._struct_specs.keys())
         params: list[str] = []
@@ -746,12 +765,12 @@ class CModule:
                 ]
                 if a.array_len is not None:
                     out_lines += [
-                        f"        arr_{a.name} = np.empty({int(a.array_len)}, dtype=base_dtype)"
+                        f"        arr_{a.name} = np.zeros({int(a.array_len)}, dtype=base_dtype)"
                     ]
                 elif a.name in contract_map:
                     expr_py = _expr_py(contract_map[a.name])
                     out_lines += [
-                        f"        arr_{a.name} = np.empty(int({expr_py}), dtype=base_dtype)"
+                        f"        arr_{a.name} = np.zeros(int({expr_py}), dtype=base_dtype)"
                     ]
                 elif a.array_len is None and a.name not in contract_map:
                     out_lines += [
@@ -761,7 +780,7 @@ class CModule:
                     out_lines += [
                         f"        ref_arr = locals().get('arr_{ref_name}', None)",
                         "        if ref_arr is not None:",
-                        f"            arr_{a.name} = np.empty_like(ref_arr, dtype=base_dtype)",
+                        f"            arr_{a.name} = np.zeros_like(ref_arr, dtype=base_dtype)",
                         "        else:",
                         f"            raise ValueError('{fspec.name}: provide {a.name} or a Contract for its length')",
                     ]
@@ -912,3 +931,36 @@ class CModule:
                 lines.append(f"    return {ret_expr}")
 
         return "\n".join(lines)
+
+    def _combined_source(self) -> str:
+        texts: list[str] = []
+        for path in [self._c_path, *self._extra_sources]:
+            try:
+                texts.append(path.read_text(encoding="utf8"))
+            except OSError:
+                continue
+        return "\n".join(texts)
+
+    def _function_source(self, fname: str) -> str | None:
+        """Return the source (including body) of the given C function if found."""
+        src = self._combined_source()
+        if not src:
+            return None
+        pattern = re.compile(
+            rf"([\w\s\*\r\n]+{re.escape(fname)}\s*\([^{{;]*\))\s*(?:/\*.*?\*/\s*)?\{{",
+            re.DOTALL,
+        )
+        m = pattern.search(src)
+        if not m:
+            return None
+        brace_start = m.end() - 1
+        depth = 0
+        for idx in range(brace_start, len(src)):
+            ch = src[idx]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return src[m.start() : idx + 1]
+        return None

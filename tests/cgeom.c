@@ -9,6 +9,10 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+/* 2D geometry functions */
+
+
+
 void geom2d_circle_get_n_points(double cx, double cy, double r, int len_points, G2DPoint *out_points)
 /* Get n points on the circumference of a circle */
 {
@@ -60,3 +64,33 @@ void geom2d_line_segment_from_start_length(double x0, double y0, double dx, doub
     out->type = 0; /* line */
 }
 
+void geom2d_rectangle_to_path(double halfwidth, double halfheight, G2DSegment *out_segments)
+/* Create a path for a rectangle centered at (0,0)
+
+Contract: len(out_segments)=4
+*/
+{
+    out_segments[0].type = 0; /* line */
+    out_segments[0].data[0] = -halfwidth;
+    out_segments[0].data[1] = -halfheight;
+    out_segments[0].data[2] = halfwidth;
+    out_segments[0].data[3] = -halfheight;
+
+    out_segments[1].type = 0; /* line */
+    out_segments[1].data[0] = halfwidth;
+    out_segments[1].data[1] = -halfheight;
+    out_segments[1].data[2] = halfwidth;
+    out_segments[1].data[3] = halfheight;
+
+    out_segments[2].type = 0; /* line */
+    out_segments[2].data[0] = halfwidth;
+    out_segments[2].data[1] = halfheight;
+    out_segments[2].data[2] = -halfwidth;
+    out_segments[2].data[3] = halfheight;
+
+    out_segments[3].type = 0; /* line */
+    out_segments[3].data[0] = -halfwidth;
+    out_segments[3].data[1] = halfheight;
+    out_segments[3].data[2] = -halfwidth;
+    out_segments[3].data[3] = -halfheight;
+}
