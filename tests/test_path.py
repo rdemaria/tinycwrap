@@ -39,3 +39,10 @@ def test_return_class_path(cp):
     seg = path.segments[0]
     assert seg['type'] == 1  # circle segment
     np.testing.assert_allclose(seg['data'][:3], [0.0, 0.0, 1.0])  # cx,cy,radius
+
+def test_build_pointer_from_data(cp):
+    segments=cp.geom2d_rectangle_to_path(2.0, 3.0)
+    assert segments.shape == (4,)
+    path=cp.G2DPath(segments=segments, len_segments=len(segments))
+    assert path.len_segments == 4
+    assert path.segments.shape == (4,)

@@ -507,9 +507,24 @@ class CModule:
                                 children[f.name] = arr
                                 data[f.name] = arr.ctypes.data
                                 data[len_field] = llen
+                            elif provided is not None:
+                                arr = np.ascontiguousarray(provided)
+                                children[f.name] = arr
+                                data[f.name] = arr.ctypes.data
+                                if len_field in dtype.names and len_field not in kwargs:
+                                    data[len_field] = len(arr)
+                            elif target_dtype is not None and len_field in dtype.names:
+                                llen = int(kwargs.get(len_field, 1))
+                                arr = np.zeros(llen, dtype=target_dtype)
+                                children[f.name] = arr
+                                data[f.name] = arr.ctypes.data
+                                data[len_field] = llen
                     for k in dtype.names:
                         if k in kwargs:
-                            data[k] = kwargs[k]
+                            try:
+                                data[k] = kwargs[k]
+                            except Exception:
+                                pass
                     object.__setattr__(self, "_data", data)
                     object.__setattr__(self, "_children", children)
 
@@ -632,20 +647,26 @@ class CModule:
         struct_names = set(self._struct_specs.keys())
         params: list[str] = []
         len_params: list[str] = []
+        optional_seen = False
         for a in fspec.args:
             if a.is_array_out and a.name.lower().startswith("out"):
                 params.append(f"{a.name}=None")
+                optional_seen = True
             elif a.is_length_param:
                 len_params.append(f"{a.name}=None")
+                optional_seen = True
             elif (
                 a.is_pointer
                 and a.base_type in struct_names
                 and not a.is_const
-                and a.name.lower().startswith("out")
             ):
                 params.append(f"{a.name}=None")
+                optional_seen = True
             else:
-                params.append(a.name)
+                if optional_seen:
+                    params.append(f"{a.name}=None")
+                else:
+                    params.append(a.name)
 
         params.extend(len_params)
         signature = ", ".join(params)
