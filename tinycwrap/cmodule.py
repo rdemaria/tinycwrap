@@ -381,24 +381,22 @@ class CModule:
             fspec.doc = doc
             contracts = []
             for line in doc.splitlines():
-                if "Contract:" in line or "Post-Contract:" in line:
-                    after = (
-                        line.split("Contract:", 1)[1]
-                        if "Contract:" in line
-                        else line.split("Post-Contract:", 1)[1]
-                    )
-                    is_post = "Post-Contract" in line
-                    for part in after.split(";"):
-                        part = part.strip()
-                        if not part:
-                            continue
-                        mlen = re.match(r"len\((\w+)\)\s*=\s*(.+)", part)
-                        if not mlen:
-                            mlen = re.match(r"(\w+)\s*=\s*(.+)", part)
-                        if mlen:
-                            target = mlen.group(1)
-                            expr = mlen.group(2).strip()
-                            contracts.append((target, expr, is_post))
+                m_contract = re.search(r"(post-)?contract:\s*(.*)", line, flags=re.IGNORECASE)
+                if not m_contract:
+                    continue
+                is_post = m_contract.group(1) is not None
+                after = m_contract.group(2)
+                for part in after.split(";"):
+                    part = part.strip()
+                    if not part:
+                        continue
+                    mlen = re.match(r"len\((\w+)\)\s*=\s*(.+)", part)
+                    if not mlen:
+                        mlen = re.match(r"(\w+)\s*=\s*(.+)", part)
+                    if mlen:
+                        target = mlen.group(1)
+                        expr = mlen.group(2).strip()
+                        contracts.append((target, expr, is_post))
             fspec.contracts = contracts or None
 
     def _mark_length_params_from_contracts(self):
@@ -496,7 +494,15 @@ class CModule:
                             target_dtype = _struct_dtypes.get(f.base_type)
                             provided = kwargs.get(f.name)
                             if provided is not None and target_dtype is not None:
-                                arr = np.ascontiguousarray(provided, dtype=target_dtype)
+                                try:
+                                    arr = np.ascontiguousarray(provided, dtype=target_dtype)
+                                except ValueError:
+                                    if hasattr(provided, "_data"):
+                                        arr = np.ascontiguousarray(provided._data, dtype=target_dtype)
+                                    elif isinstance(provided, (list, tuple)) and provided and hasattr(provided[0], "_data"):
+                                        arr = np.ascontiguousarray([p._data for p in provided], dtype=target_dtype)
+                                    else:
+                                        raise
                                 children[f.name] = arr
                                 data[f.name] = arr.ctypes.data
                                 if len_field in dtype.names and len_field not in kwargs:

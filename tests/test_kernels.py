@@ -14,9 +14,9 @@ def cm():
 
 
 def test_dot(cm):
-    x = np.arange(10, dtype=np.float64)
-    y = np.ones_like(x)
-    assert cm.dot(x, y, len_x=len(x)) == np.sum(x * y)
+    x = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+    y = np.array([4.0, 5.0, 6.0], dtype=np.float64)
+    assert cm.dot(x, y, len_x=len(x)) == np.dot(x, y)
 
 
 def test_scale_auto_output(cm):

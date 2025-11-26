@@ -468,3 +468,17 @@ void geom2d_path_from_circle(double r, G2DPath *path)
     return;
 }
 
+void geom2d_segments_from_rectellipse(double halfwidth, double halfheight, double rx, double ry, G2DSegment *out_segments, int *out_len)
+/* Create a path for the intersection between a rectangle and an ellipse
+
+Contract: len(out_segments)=8
+Post-contract: len(out_segments)=out_len
+*/
+{
+    /* populate only 4 segments for the test */
+    out_segments[0].type = 0;
+    out_segments[1].type = 0;
+    out_segments[2].type = 0;
+    out_segments[3].type = 0;
+    *out_len = 4;
+}

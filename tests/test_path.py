@@ -52,3 +52,7 @@ def test_repr_pointer_array(cp):
     repr_str = repr(path)
     assert "segments=<segments* 0x" in repr_str
     assert "len_segments=2" in repr_str
+
+def test_post_contract(cp):
+    segments, len_segments = cp.geom2d_segments_from_rectellipse(1,2,3,4)
+    assert segments.shape == (4,)

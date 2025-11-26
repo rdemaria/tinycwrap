@@ -110,3 +110,4 @@ Contract: len(out_segments)=4
     out_segments[3].data[2] = -halfwidth;
     out_segments[3].data[3] = -halfheight;
 }
+
