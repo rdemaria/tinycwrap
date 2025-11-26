@@ -6,6 +6,6 @@ from .cmodule import CModule
 try:
     __version__ = version("tinycwrap")
 except PackageNotFoundError:
-    __version__ = "0.0.2"
+    __version__ = "0.0.3"
 
 __all__ = ["CModule", "__version__"]
