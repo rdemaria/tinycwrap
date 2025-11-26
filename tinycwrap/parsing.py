@@ -200,10 +200,6 @@ def _parse_structs_with_pycparser(cdef: str) -> dict[str, StructSpec]:
                 for decl in struct.decls:
                     ctype, is_ptr, is_const, arr_len = _ctype_from_decl(decl.type)
                     base = base_type_from_ctype(ctype)
-                    try:
-                        numpy_dtype_for_base_type(base)
-                    except TypeError:
-                        continue
                     fields.append(
                         StructField(
                             name=decl.name,
@@ -311,7 +307,7 @@ def _parse_structs_regex(cdef: str) -> dict[str, StructSpec]:
             if not line:
                 continue
             line = re.sub(r"/\*.*?\*/", "", line).strip()
-            m_field = re.match(r"(.+?)\s+([A-Za-z_]\w*)(\s*\[(\d+)\])?$", line)
+            m_field = re.match(r"(.+?\*?)\s*([A-Za-z_]\w*)(\s*\[(\d+)\])?$", line)
             if not m_field:
                 continue
             raw_ctype = m_field.group(1).strip()
@@ -320,10 +316,6 @@ def _parse_structs_regex(cdef: str) -> dict[str, StructSpec]:
             is_pointer = "*" in raw_ctype
             is_const = "const" in raw_ctype
             base = base_type_from_ctype(raw_ctype)
-            try:
-                numpy_dtype_for_base_type(base)
-            except TypeError:
-                continue
             fields.append(
                 StructField(
                     name=fname,

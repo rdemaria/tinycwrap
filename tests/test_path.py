@@ -21,3 +21,21 @@ def test_path_get_steps_contract(cp):
     expected_len = cp.geom2d_path_get_len_steps(segments, len_segments=len(segments), ds_min=0.25)
     assert len(steps) == expected_len
     assert np.isclose(steps[-1], cp.geom2d_path_get_length(segments, len_segments=1))
+
+
+def test_path_struct_pointer_array(cp):
+    path = cp.G2DPath(len_segments=3)
+    assert path.len_segments == 3
+    assert isinstance(path.segments, np.ndarray)
+    assert path.segments.shape == (3,)
+    assert path.segments.dtype == cp.G2DSegment.dtype
+
+
+def test_return_class_path(cp):
+    path=cp.G2DPath(len_segments=1)
+    cp.geom2d_path_from_circle(1.0, path)
+    assert path.len_segments == 1
+    assert path.segments.shape == (1,)
+    seg = path.segments[0]
+    assert seg['type'] == 1  # circle segment
+    np.testing.assert_allclose(seg['data'][:3], [0.0, 0.0, 1.0])  # cx,cy,radius

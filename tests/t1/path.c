@@ -451,3 +451,20 @@ Contract: len_segments=len(segments); len(out_steps)=geom2d_path_get_len_steps(s
         out_steps[max_len - 1] = total_length;
     }
 }
+
+void geom2d_path_from_circle(double r, G2DPath *path)
+/* Create a path for a circle centered at (0,0)
+
+*/
+{
+    G2DSegment *out_segments = path->segments;
+    out_segments[0].type = 1;      /* arc */
+    out_segments[0].data[0] = 0.0; /* cx */
+    out_segments[0].data[1] = 0.0; /* cy */
+    out_segments[0].data[2] = r;   /* r */
+    out_segments[0].data[3] = 0.0; /* start_angle */
+    out_segments[0].data[4] = 2.0 * M_PI; /* end_angle */
+    path->len_segments = 1;
+    return;
+}
+

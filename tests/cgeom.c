@@ -50,6 +50,22 @@ double geom2d_norm(double x, double y)
     return sqrt(x*x + y*y);
 }
 
+double geom2d_polygon_length(const G2DPoint *points, int len_points)
+/* Compute perimeter length of a polyline given by points 
+
+Contract: len_points=len(points)
+*/
+{
+    if (len_points <= 1) return 0.0;
+    double total = 0.0;
+    for (int i = 1; i < len_points; ++i) {
+        double dx = points[i].x - points[i-1].x;
+        double dy = points[i].y - points[i-1].y;
+        total += sqrt(dx*dx + dy*dy);
+    }
+    return total;
+}
+
 void geom2d_line_segment_from_start_length(double x0, double y0, double dx, double dy, double length, G2DSegment *out)
 /* Get line data from starting point, direction (assuming dx,dy have norm=1) and length
 

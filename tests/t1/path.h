@@ -19,6 +19,11 @@ typedef struct {
     double data[8]; 
 } G2DSegment;
 
+typedef struct {
+    G2DSegment *segments;
+    int len_segments;
+} G2DPath;
+
 void geom2d_line_segment_from_start_length(double x0, double y0, double dx, double dy, double length, G2DSegment *out);
 double geom2d_line_segment_get_length(const G2DSegment *seg);
 double geom2d_line_segment_get_points_at_steps(const G2DSegment *seg, const double *steps, int len_points, G2DPoint *out_points);

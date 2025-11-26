@@ -52,3 +52,12 @@ def test_docstring_contains_contract(cg):
     doc = cg.geom2d_rectangle_to_path.__doc__
     assert "Contract: len(out_segments)=4" in doc
     assert "Auto-wrapped C function `geom2d_rectangle_to_path`." in doc
+
+
+def test_polygon_length(cg):
+    pts = cg.G2DPoints(len_points=3)
+    pts.points[0]["x"] = 0.0; pts.points[0]["y"] = 0.0
+    pts.points[1]["x"] = 1.0; pts.points[1]["y"] = 0.0
+    pts.points[2]["x"] = 1.0; pts.points[2]["y"] = 1.0
+    length = cg.geom2d_polygon_length(pts.points)
+    assert length == 2.0

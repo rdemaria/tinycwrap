@@ -15,4 +15,12 @@ typedef struct {
 } G2DSegment;
 
 
+typedef struct {
+    G2DPoint *points;
+    int len_points;
+} G2DPoints;
+
+double geom2d_polygon_length(const G2DPoint *points, int len_points);
+
+
 #endif /* CGEOM_C */

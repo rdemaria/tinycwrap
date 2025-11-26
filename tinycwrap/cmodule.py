@@ -462,8 +462,19 @@ class CModule:
         for sname, sspec in self._struct_specs.items():
             try:
                 dtype_fields = []
+                pointer_meta = []
                 for f in sspec.fields:
-                    base_dtype = numpy_dtype_for_base_type(f.base_type)
+                    try:
+                        base_dtype = numpy_dtype_for_base_type(f.base_type)
+                    except TypeError:
+                        base_dtype = None
+                    if f.is_pointer:
+                        dtype_fields.append((f.name, np.uintp))
+                        pointer_meta.append(f)
+                        if base_dtype is None:
+                            continue
+                    if base_dtype is None:
+                        continue
                     if f.array_len:
                         dtype_fields.append((f.name, (base_dtype, (f.array_len,))))
                     else:
@@ -472,15 +483,35 @@ class CModule:
             except TypeError:
                 continue
 
-            def make_struct_class(spec, dtype):
-                slots = ("_data",)
+            def make_struct_class(spec, dtype, _struct_dtypes=self._struct_dtypes):
+                slots = ("_data", "_children")
 
                 def __init__(self, **kwargs):
                     data = np.zeros((), dtype=dtype)
+                    children = {}
+                    # handle pointer+len convention
+                    for f in spec.fields:
+                        if f.is_pointer and f.name in dtype.names:
+                            len_field = f"len_{f.name}"
+                            target_dtype = _struct_dtypes.get(f.base_type)
+                            provided = kwargs.get(f.name)
+                            if provided is not None and target_dtype is not None:
+                                arr = np.ascontiguousarray(provided, dtype=target_dtype)
+                                children[f.name] = arr
+                                data[f.name] = arr.ctypes.data
+                                if len_field in dtype.names and len_field not in kwargs:
+                                    data[len_field] = len(arr)
+                            elif len_field in kwargs and target_dtype is not None:
+                                llen = int(kwargs[len_field])
+                                arr = np.zeros(llen, dtype=target_dtype)
+                                children[f.name] = arr
+                                data[f.name] = arr.ctypes.data
+                                data[len_field] = llen
                     for k in dtype.names:
                         if k in kwargs:
                             data[k] = kwargs[k]
                     object.__setattr__(self, "_data", data)
+                    object.__setattr__(self, "_children", children)
 
                 def __repr__(self):
                     parts_list = []
@@ -508,7 +539,9 @@ class CModule:
                     field_info = dtype.fields[fname][0]
                     is_scalar = field_info.shape == ()
 
-                    def getter(self, fname=fname, is_scalar=is_scalar):
+                    def getter(self, fname=fname, is_scalar=is_scalar, field_info=field_info):
+                        if fname in getattr(self, "_children", {}):
+                            return self._children[fname]
                         val = self._data[fname]
                         return val.item() if is_scalar else val
 
@@ -519,6 +552,11 @@ class CModule:
                         field_info=field_info,
                         is_scalar=is_scalar,
                     ):
+                        if fname in getattr(self, "_children", {}):
+                            arr = np.ascontiguousarray(value, dtype=self._children[fname].dtype)
+                            self._children[fname] = arr
+                            self._data[fname] = arr.ctypes.data
+                            return
                         if is_scalar:
                             self._data[fname] = value
                         else:
