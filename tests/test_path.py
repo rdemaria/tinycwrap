@@ -46,3 +46,9 @@ def test_build_pointer_from_data(cp):
     path=cp.G2DPath(segments=segments, len_segments=len(segments))
     assert path.len_segments == 4
     assert path.segments.shape == (4,)
+
+def test_repr_pointer_array(cp):
+    path = cp.G2DPath(len_segments=2)
+    repr_str = repr(path)
+    assert "segments=<segments* 0x" in repr_str
+    assert "len_segments=2" in repr_str

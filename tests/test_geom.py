@@ -27,12 +27,18 @@ def test_circle_points_length_contract(cg):
     assert pts.shape == (101,)
 
 
+
 def test_return_struct_array_member(cg):
     seg = cg.G2DSegment()
     seg.type = 1
     seg.data = [0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0]
     assert seg.type == 1
     np.testing.assert_allclose(seg.data, [0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0])
+    seg= cg.G2DSegment(type=2, data=[9.0]*8)
+    assert seg.type == 2
+    np.testing.assert_allclose(seg.data, [9.0]*8)
+
+
 
 def test_geom2d_return_strct(cg):
     seg = cg.geom2d_line_segment_from_start_length(0.1, 0.2, 0.5, 0.4, 0.3)

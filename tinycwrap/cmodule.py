@@ -521,16 +521,37 @@ class CModule:
                                 data[len_field] = llen
                     for k in dtype.names:
                         if k in kwargs:
-                            try:
-                                data[k] = kwargs[k]
-                            except Exception:
-                                pass
+                            val = kwargs[k]
+                            field_info = dtype.fields[k][0]
+                            if field_info.shape != ():
+                                arr = np.asarray(val, dtype=field_info.base)
+                                if arr.shape != field_info.shape:
+                                    raise ValueError(f"Field {k} expects shape {field_info.shape}, got {arr.shape}")
+                                np.copyto(data[k], arr)
+                            else:
+                                if k in children:
+                                    data[k] = children[k].ctypes.data
+                                elif isinstance(val, np.ndarray):
+                                    if val.dtype.kind == "V" and val.shape != ():
+                                        arr = np.ascontiguousarray(val)
+                                        data[k] = arr.ctypes.data
+                                        if f"len_{k}" in dtype.names and f"len_{k}" not in kwargs:
+                                            data[f"len_{k}"] = len(arr)
+                                    else:
+                                        data[k] = val
+                                else:
+                                    data[k] = val
                     object.__setattr__(self, "_data", data)
                     object.__setattr__(self, "_children", children)
 
                 def __repr__(self):
                     parts_list = []
+                    pointer_lengths = getattr(self, "_pointer_lengths", {})
                     for name in dtype.names:
+                        if name in pointer_lengths:
+                            ptr_val = int(self._data[name])
+                            parts_list.append(f"{name}=<{name}* 0x{ptr_val:x}>")
+                            continue
                         val = self._data[name]
                         if val.shape == ():
                             parts_list.append(f"{name}={val.item()!r}")
@@ -548,6 +569,7 @@ class CModule:
                     "zeros": staticmethod(
                         lambda n, _dtype=dtype: np.zeros(n, dtype=_dtype)
                     ),
+                    "_pointer_lengths": {f.name: f"len_{f.name}" for f in spec.fields if f.is_pointer},
                 }
 
                 for fname in dtype.names:
@@ -784,11 +806,10 @@ class CModule:
             if a.is_array_in:
                 const_prefix = "const " if a.is_const else ""
                 if a.base_type in struct_names:
-                    cls_expr = f"_struct_classes['{a.base_type}']"
                     dtype_expr = f"_struct_dtypes['{a.base_type}']"
                     pre_lines += [
-                        f"    if isinstance({a.name}, {cls_expr}):",
-                        f"        arr_{a.name} = {a.name}._data",
+                        f"    if hasattr({a.name}, '_data') and getattr({a.name}, '_data', None) is not None and getattr({a.name}, '_data').dtype == {dtype_expr}:",
+                        f"        arr_{a.name} = getattr({a.name}, '_data')",
                         "    else:",
                         f"        arr_{a.name} = np.ascontiguousarray({a.name}, dtype={dtype_expr})",
                         f"    ptr_{a.name} = _self._ffi.cast('{const_prefix}{a.base_type} *', _self._ffi.from_buffer(arr_{a.name}))",
@@ -893,11 +914,10 @@ class CModule:
                         )
             elif a.is_pointer and a.base_type in struct_names:
                 dtype_expr = f"_struct_dtypes['{a.base_type}']"
-                cls_expr = f"_struct_classes['{a.base_type}']"
                 if a.is_const:
                     out_lines += [
-                        f"    if isinstance({a.name}, {cls_expr}):",
-                        f"        arr_{a.name} = {a.name}._data",
+                        f"    if hasattr({a.name}, '_data') and getattr({a.name}, '_data', None) is not None and getattr({a.name}, '_data').dtype == {dtype_expr}:",
+                        f"        arr_{a.name} = getattr({a.name}, '_data')",
                         "    else:",
                         f"        arr_{a.name} = np.ascontiguousarray({a.name}, dtype={dtype_expr})",
                         f"    ptr_{a.name} = _self._ffi.cast('{a.base_type} *', _self._ffi.from_buffer(arr_{a.name}))",
@@ -905,33 +925,18 @@ class CModule:
                 else:
                     out_lines += [
                         f"    if {a.name} is None:",
-                    ]
-                    if a.array_len is not None:
-                        out_lines += [
-                            f"        arr_{a.name} = np.zeros({int(a.array_len)}, dtype={dtype_expr})"
-                        ]
-                    elif a.name in contract_map:
-                        expr_py = _expr_py(contract_map[a.name])
-                        out_lines += [
-                            f"        arr_{a.name} = np.zeros(int({expr_py}), dtype={dtype_expr})"
-                        ]
-                    elif a.array_len is None and a.name not in contract_map:
-                        out_lines += [
-                            f"        arr_{a.name} = np.zeros((), dtype={dtype_expr})"
-                        ]
-                    else:
-                        out_lines += [
-                            f"        raise ValueError('{fspec.name}: provide {a.name} or a Contract for its length')"
-                        ]
-                    out_lines += [
-                        f"    elif isinstance({a.name}, {cls_expr}):",
+                        f"        obj_{a.name} = _struct_classes['{a.base_type}']()",
+                        f"        arr_{a.name} = obj_{a.name}._data",
+                        f"    elif hasattr({a.name}, '_data') and getattr({a.name}, '_data', None) is not None and getattr({a.name}, '_data').dtype == {dtype_expr}:",
+                        f"        obj_{a.name} = {a.name}",
                         f"        arr_{a.name} = {a.name}._data",
                         "    else:",
                         f"        arr_{a.name} = np.ascontiguousarray({a.name}, dtype={dtype_expr})",
+                        f"        obj_{a.name} = None",
                         f"    ptr_{a.name} = _self._ffi.cast('{a.base_type} *', _self._ffi.from_buffer(arr_{a.name}))",
                     ]
                     output_names.append(a.name)
-                    output_vars.append(f"arr_{a.name}")
+                    output_vars.append(f"obj_{a.name} if obj_{a.name} is not None else arr_{a.name}")
                 arg_call_args[idx] = f"ptr_{a.name}"
             elif a.is_scalar and not a.is_length_param and arg_call_args[idx] is None:
                 scalar_lines.append(f"    {a.name} = {a.name}")
