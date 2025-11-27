@@ -428,13 +428,14 @@ class CModule:
                         "size_t",
                         "ssize_t",
                     )
-                    and (not arg.is_pointer)
                     and arg.name in referenced
                 ):
                     arg.is_length_param = True
             for arg in fspec.args:
                 if arg.is_length_param:
                     arg.is_scalar = False
+                    arg.is_array_in = False
+                    arg.is_array_out = False
                 elif (
                     (not arg.is_pointer)
                     and arg.array_len is None
@@ -753,6 +754,7 @@ class CModule:
                 else:
                     contract_map[target] = expr
 
+        length_pointer_names = {a.name for a in fspec.args if a.is_length_param and a.is_pointer}
         pointer_scalar_names = {
             a.name
             for a in fspec.args
@@ -773,7 +775,7 @@ class CModule:
                     "ssize_t",
                 )
             )
-        }
+        } | length_pointer_names
 
         func_names = set(self._func_specs.keys())
 
@@ -782,6 +784,7 @@ class CModule:
             expr = re.sub(r"len\((\w+)\)", r"len(arr_\1)", expr)
             for name in pointer_scalar_names:
                 expr = re.sub(rf"\b{name}\b", f"int(arr_{name}.ravel()[0])", expr)
+                expr = re.sub(rf"\b{name}\b", f"scalar_{name}", expr)
             if func_names:
                 pattern = r"\b(" + "|".join(re.escape(n) for n in func_names) + r")\s*\(([^()]*)\)"
 
@@ -809,6 +812,17 @@ class CModule:
         scalar_lines: list[str] = []
 
         for a in fspec.args:
+            if a.is_length_param and a.is_pointer:
+                base_dtype = "np.dtype('int32')"
+                out_lines = [
+                    f"    arr_{a.name} = np.zeros((), dtype={base_dtype})",
+                    f"    ptr_{a.name} = _self._ffi.cast('{a.base_type} *', _self._ffi.from_buffer(arr_{a.name}))",
+                ]
+                call_args.append(f"ptr_{a.name}")
+                output_vars.append(f"arr_{a.name}")
+                output_names.append(a.name)
+                pointer_scalar_outputs.append((a.name, f"arr_{a.name}"))
+                continue
             if a.is_array_in:
                 const_prefix = "const " if a.is_const else ""
                 if a.base_type in struct_names:
@@ -840,21 +854,25 @@ class CModule:
                 scalar_lines.append(f"    {a.name} = {a.name}")
                 call_args.append(a.name)
             elif a.is_length_param:
-                if a.name in contract_map:
-                    expr_py = _expr_py(contract_map[a.name])
-                    length_lines += [
-                        f"    if {a.name} is None:",
-                        f"        {a.name} = int({expr_py})",
-                        f"    else:",
-                        f"        {a.name} = int({a.name})",
-                    ]
+                if a.is_pointer:
+                    # handled in array/pointer branch
+                    call_args.append(None)
                 else:
-                    length_lines += [
-                        f"    if {a.name} is None:",
-                        f"        raise ValueError('{fspec.name}: length parameter {a.name} requires an explicit Contract')",
-                        f"    {a.name} = int({a.name})",
-                    ]
-                call_args.append(a.name)
+                    if a.name in contract_map:
+                        expr_py = _expr_py(contract_map[a.name])
+                        length_lines += [
+                            f"    if {a.name} is None:",
+                            f"        {a.name} = int({expr_py})",
+                            f"    else:",
+                            f"        {a.name} = int({a.name})",
+                        ]
+                    else:
+                        length_lines += [
+                            f"    if {a.name} is None:",
+                            f"        raise ValueError('{fspec.name}: length parameter {a.name} requires an explicit Contract')",
+                            f"    {a.name} = int({a.name})",
+                        ]
+                    call_args.append(a.name)
             else:
                 # defer outputs / pointer handling
                 call_args.append(None)  # placeholder
@@ -960,11 +978,6 @@ class CModule:
         else:
             lines.append(f"    res = {call_expr}")
 
-        for out_name, out_var in zip(output_names, output_vars):
-            if out_name in post_contract_map:
-                expr_py = _expr_py(post_contract_map[out_name])
-                lines.append(f"    {out_var} = {out_var}[:int({expr_py})]")
-
         for name, arr_var in pointer_scalar_outputs:
             lines.append(f"    scalar_{name} = int(np.asarray({arr_var}).ravel()[0])")
 
@@ -972,11 +985,19 @@ class CModule:
         for name, arr_var, cls_expr in struct_scalar_outputs:
             lines.append(f"    obj_{name} = {cls_expr}()")
             lines.append(f"    object.__setattr__(obj_{name}, '_data', np.array({arr_var}, copy=True))")
+        pointer_scalar_map = {arr: (name, f"scalar_{name}") for name, arr in pointer_scalar_outputs}
+        pairs = list(zip(output_names, output_vars))
+        # place array outputs before scalar pointer lengths
+        pairs_sorted = sorted(pairs, key=lambda p: 1 if p[1] in pointer_scalar_map else 0)
+        output_names_reordered: list[str] = []
         output_vars_final: list[str] = []
-        for ov in output_vars:
+        for name, ov in pairs_sorted:
+            output_names_reordered.append(name)
             if ov in struct_scalar_map:
                 n, _ = struct_scalar_map[ov]
                 output_vars_final.append(f"obj_{n}")
+            elif ov in pointer_scalar_map:
+                output_vars_final.append(pointer_scalar_map[ov][1])
             else:
                 output_vars_final.append(ov)
 
@@ -991,8 +1012,20 @@ class CModule:
                     ret_expr = f"{output_vars_final[0]}, res"
                 else:
                     ret_expr = "(" + ", ".join(output_vars_final) + "), res"
+            # apply post-contract slicing using scalar lengths if available
+            for out_name, out_var in zip(output_names_reordered, output_vars_final):
+                if out_name in post_contract_map:
+                    expr_py = _expr_py(post_contract_map[out_name])
+                    scalar_names = {n for n, _ in pointer_scalar_outputs}
+                    if out_name in scalar_names:
+                        expr_py = expr_py.replace(out_name, f"scalar_{out_name}")
+                    ret_expr = ret_expr.replace(out_var, f"({out_var})[:int({expr_py})]")
             if pointer_scalar_outputs:
-                scalars = [f"scalar_{n}" for n, _ in pointer_scalar_outputs]
+                scalars = [
+                    f"scalar_{n}"
+                    for n, _ in pointer_scalar_outputs
+                    if f"scalar_{n}" not in output_vars_final
+                ]
                 if isinstance(ret_expr, str) and ret_expr.startswith("("):
                     ret_expr = (
                         ret_expr[:-1]
