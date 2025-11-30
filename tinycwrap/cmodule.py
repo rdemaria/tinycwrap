@@ -11,6 +11,7 @@ from cffi import FFI
 from .parsing import (
     FuncSpec,
     StructSpec,
+    base_type_from_ctype,
     numpy_dtype_for_base_type,
     parse_functions_from_cdef,
     parse_structs_from_cdef,
@@ -163,6 +164,8 @@ class CModule:
 
         # Re-parse cdef and attach docs from C source, then create wrappers
         self._func_specs = parse_functions_from_cdef(self._cdef)
+        # remove helper prototypes we add for ownership
+        self._func_specs.pop("free", None)
         self._struct_specs = parse_structs_from_cdef(self._cdef)
         self._attach_docs_from_source()
         self._mark_length_params_from_contracts()
@@ -287,6 +290,21 @@ class CModule:
         src_wo_pp = re.sub(r"__declspec\s*\([^)]+\)", "", src_wo_pp)
         src_wo_pp = re.sub(r"__asm__\s*\([^)]*\)", "", src_wo_pp)
 
+        # Keep a version with only top-level text (brace depth 0) to avoid
+        # picking up statements inside function bodies.
+        top_level_chars = []
+        depth = 0
+        for ch in src_wo_pp:
+            if ch == "{":
+                depth += 1
+            if depth == 0:
+                top_level_chars.append(ch)
+            if ch == "}" and depth > 0:
+                depth -= 1
+                if depth == 0:
+                    top_level_chars.append("\n")
+        top_level_src = "".join(top_level_chars)
+
         # regex for function definitions
         func_def_re = re.compile(
             r"""
@@ -311,11 +329,15 @@ class CModule:
             r"typedef\s+struct\s+(?:\w+\s*)?{(?P<body>[^}]*)}\s*(?P<name>\w+)\s*;",
             re.DOTALL,
         )
+        seen_structs = set()
         for m in struct_re.finditer(src_wo_pp):
-            struct_text = m.group(0)
-            struct_defs.append(struct_text.strip())
+            struct_text = m.group(0).strip()
+            if struct_text not in seen_structs:
+                struct_defs.append(struct_text)
+                seen_structs.add(struct_text)
 
         proto_set = set()
+        proto_name_set = set()
         for m in func_def_re.finditer(src_wo_pp):
             if m.group("prefix") and "static" in m.group("prefix"):
                 # ignore static functions, not exported
@@ -339,12 +361,46 @@ class CModule:
                 continue
             args = " ".join(strip_restrict_keywords(m.group("args")).split())
             proto = f"{ret} {name}({args});"
-            if proto not in proto_set:
+            if name not in proto_name_set:
                 prototypes.append(proto)
                 proto_set.add(proto)
+                proto_name_set.add(name)
+
+        # also pick up function declarations (without body), e.g., from headers
+        decl_re = re.compile(r"([A-Za-z_][A-Za-z0-9_\s\*]*?)\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*;")
+        for m in decl_re.finditer(top_level_src):
+            if "return" in m.group(0) or "=" in m.group(0):
+                continue
+            ret = " ".join(strip_restrict_keywords(m.group(1)).split())
+            if "static" in ret.split():
+                continue
+            name = m.group(2)
+            args = " ".join(strip_restrict_keywords(m.group(3)).split())
+            proto = f"{ret} {name}({args});"
+            if name not in proto_name_set:
+                prototypes.append(proto)
+                proto_set.add(proto)
+                proto_name_set.add(name)
 
         if not prototypes and not struct_defs:
             raise RuntimeError(f"No functions found in {self._c_path} to generate cdef")
+        # fallback: if we missed pointer-returning prototypes present as lines
+        type_prefix_re = re.compile(r"^(void|int|float|double|long|unsigned|signed|struct|char)\b")
+        for line in top_level_src.splitlines():
+            line_clean = line.strip()
+            if not line_clean or line_clean.startswith("typedef") or ":" in line_clean:
+                continue
+            if not type_prefix_re.match(line_clean):
+                continue
+            if "=" in line_clean:
+                continue
+            if "(" in line_clean and ")" in line_clean and line_clean.endswith(";"):
+                name_match = re.match(r"[A-Za-z_][A-Za-z0-9_\s\*]*?\s+([A-Za-z_]\w*)\s*\(", line_clean)
+                fname = name_match.group(1) if name_match else line_clean
+                if fname not in proto_name_set:
+                    prototypes.append(line_clean)
+                    proto_set.add(line_clean)
+                    proto_name_set.add(fname)
 
         cdef_parts = []
         if struct_defs:
@@ -357,6 +413,8 @@ class CModule:
                 continue
             cdef_lines.append(line)
         cdef = "\n".join(cdef_lines)
+        if "free(" not in cdef:
+            cdef += "\nvoid free(void *);"
         show = self._verbose if verbose is None else verbose
         if show:
             print("[CModule] Auto-generated cdef:\n" + cdef)
@@ -380,9 +438,16 @@ class CModule:
             doc = re.sub(r"\n\s+", "\n", doc)
             fspec.doc = doc
             contracts = []
+            owns: list[str] = []
             for line in doc.splitlines():
                 m_contract = re.search(r"(post-)?contract:\s*(.*)", line, flags=re.IGNORECASE)
                 if not m_contract:
+                    m_own = re.search(r"own:\s*(.*)", line, flags=re.IGNORECASE)
+                    if m_own:
+                        for name in m_own.group(1).split(","):
+                            n = name.strip()
+                            if n:
+                                owns.append(n)
                     continue
                 is_post = m_contract.group(1) is not None
                 after = m_contract.group(2)
@@ -398,6 +463,7 @@ class CModule:
                         expr = mlen.group(2).strip()
                         contracts.append((target, expr, is_post))
             fspec.contracts = contracts or None
+            fspec.owns = owns or None
 
     def _mark_length_params_from_contracts(self):
         """Mark length-like parameters based solely on explicit contracts."""
@@ -640,6 +706,7 @@ class CModule:
             "_self": self,
             "np": np,
             "numpy_dtype_for_base_type": numpy_dtype_for_base_type,
+            "base_type_from_ctype": base_type_from_ctype,
             "_struct_classes": self._struct_classes,
             "_struct_dtypes": self._struct_dtypes,
         }
@@ -972,10 +1039,14 @@ class CModule:
 
         ret_type = fspec.return_ctype.strip()
         call_expr = f"cfun({', '.join(arg_call_args)})"
-        if ret_type == "void":
-            lines.append(f"    {call_expr}")
+        own_return = fspec.owns and "return" in fspec.owns and fspec.return_ctype.strip().endswith("*")
+        if own_return:
+            lines.append(f"    res_ptr = {call_expr}")
         else:
-            lines.append(f"    res = {call_expr}")
+            if ret_type == "void":
+                lines.append(f"    {call_expr}")
+            else:
+                lines.append(f"    res = {call_expr}")
 
         for name, arr_var in pointer_scalar_outputs:
             lines.append(f"    scalar_{name} = int(np.asarray({arr_var}).ravel()[0])")
@@ -999,6 +1070,57 @@ class CModule:
                 output_vars_final.append(pointer_scalar_map[ov][1])
             else:
                 output_vars_final.append(ov)
+
+        own_return_len_expr = None
+        if own_return and contract_map.get("return"):
+            own_return_len_expr = _expr_py(contract_map["return"])
+
+        if own_return:
+            base_ret = base_type_from_ctype(fspec.return_ctype)
+            ret_dtype_expr = f"np.dtype('{np.dtype(numpy_dtype_for_base_type(base_ret)).name}')"
+            lines.append("    lib_free = None")
+            lines.append("    try:")
+            lines.append("        lib_free = _self._lib.free")
+            lines.append("    except AttributeError:")
+            lines.append("        pass")
+            lines.append("    libc_free = None")
+            lines.append("    for _cand in (None, 'libc.so.6', 'libc.so', 'libc.dylib'):")
+            lines.append("        if libc_free is not None:")
+            lines.append("            break")
+            lines.append("        try:")
+            lines.append("            _libc = _self._ffi.dlopen(_cand)")
+            lines.append("            libc_free = getattr(_libc, 'free', None)")
+            lines.append("        except OSError:")
+            lines.append("            continue")
+            lines.append("    free_fn = lib_free or libc_free")
+            lines.append(f"    if free_fn is None: raise RuntimeError('{fspec.name}: cannot locate free() for owned return')")
+            if own_return_len_expr is None:
+                lines.append(f"    raise ValueError('{fspec.name}: Own return requires len(return)=... Contract')")
+            else:
+                for name, arr_var in pointer_scalar_outputs:
+                    if f"scalar_{name}" not in [v for v in output_vars_final]:
+                        lines.append(f"    scalar_{name} = int(np.asarray({arr_var}).ravel()[0])")
+                # allow len(return)=out_len style expressions that use pointer-scalar values
+                lines.append(f"    res_buf = _self._ffi.gc(res_ptr, free_fn)")
+                lines.append(
+                    f"    arr_ret = np.frombuffer(_self._ffi.buffer(res_buf, int({own_return_len_expr}) * np.dtype({ret_dtype_expr}).itemsize), dtype={ret_dtype_expr})"
+                )
+            ret_parts: list[str] = ["arr_ret"]
+            if output_vars_final:
+                for v in output_vars_final:
+                    if v not in ret_parts:
+                        ret_parts.append(v)
+            # append any scalar lengths not already in ret_parts
+            for name, _arr in pointer_scalar_outputs:
+                sval = f"scalar_{name}"
+                if sval not in ret_parts:
+                    ret_parts.append(sval)
+            if len(ret_parts) == 1:
+                ret_expr = ret_parts[0]
+            else:
+                ret_expr = "(" + ", ".join(ret_parts) + ")"
+            lines.append(f"    return {ret_expr}")
+            return "\n".join(lines)
 
         if output_vars_final:
             if ret_type == "void":

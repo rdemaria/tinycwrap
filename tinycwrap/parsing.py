@@ -72,6 +72,7 @@ class FuncSpec:
     args: list   # list[ArgSpec]
     doc: str | None = None
     contracts: list[tuple[str, str, bool]] | None = None
+    owns: list[str] | None = None
 
 
 @dataclass
@@ -151,7 +152,9 @@ def _parse_functions_with_pycparser(cdef: str) -> dict[str, FuncSpec]:
     for ext in ast.ext:
         if isinstance(ext, c_ast.Decl) and isinstance(ext.type, c_ast.FuncDecl):
             fname = ext.name
-            ret_ctype, _, _, _ = _ctype_from_decl(ext.type.type)
+            ret_ctype, ret_is_ptr, _, _ = _ctype_from_decl(ext.type.type)
+            if ret_is_ptr:
+                ret_ctype = ret_ctype + " *"
             argspecs: list[ArgSpec] = []
             args = ext.type.args
             if args and args.params:

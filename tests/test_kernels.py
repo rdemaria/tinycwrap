@@ -88,6 +88,13 @@ def test_merge_sorted(cm):
     assert out_len_val == 4
 
 
+def test_owned_array(cm):
+    arr, n = cm.alloc_random_array()
+    assert arr.shape[0] == n
+    assert n >= 3
+    assert np.all(arr[:n] >= 1.0)
+
+
 def test_struct_output_array(cm):
     n = 4
     particles = cm.Particle.zeros(n)

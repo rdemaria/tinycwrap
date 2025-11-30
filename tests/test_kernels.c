@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <math.h>
+#include <stdlib.h>
 #include "test_kernels.h"
 
 double dot(const double *restrict x, const double *restrict y, int len_x)
@@ -140,4 +141,19 @@ Post-Contract: len(out)=out_len;
         }
     }
     *out_len = k;
+}
+
+double *alloc_random_array(int *out_len)
+/* Allocate an array with random-ish length
+
+Own: return
+Contract: len(return)=out_len
+*/
+{
+    int n = (int)(rand() % 5 + 3); /* length between 3 and 7 */
+    double *arr = (double *)malloc(n * sizeof(double));
+    for (int i = 0; i < n; ++i)
+        arr[i] = (double)(i + 1);
+    *out_len = n;
+    return arr;
 }

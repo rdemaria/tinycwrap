@@ -17,3 +17,5 @@ double complex_magnitude(const ComplexPair *z);
 double kinetic_energy(const Particle *p, int len_p);
 void split_vectors(const double *restrict inp, int len_inp, double *restrict out1, double *restrict out2);
 void make_particles(double speed, Particle *out_p, int len_p);
+void merge_sorted(const double * a, const double * b, int len_a, int len_b, double *out, int *out_len);
+double *alloc_random_array(int *out_len);
