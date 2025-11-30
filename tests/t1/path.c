@@ -45,7 +45,7 @@ double geom2d_line_segment_get_length(const G2DSegment *seg)
 double geom2d_line_segment_get_points_at_steps(const G2DSegment *seg, const double *steps, int len_points, G2DPoint *out_points)
 /* Get points along a line segment at specified steps
 
-Contract: len(steps)=len_points; len(out_points)=len_points
+Contract: len(steps)=len_points; len(out_points)=len_points;
 */
 {
     double x1 = seg->data[0];
@@ -124,7 +124,7 @@ double geom2d_arc_segment_get_length(const G2DSegment *seg)
 double geom2d_arc_segment_get_points_at_steps(const G2DSegment *seg, const double *steps, int len_points, G2DPoint *out_points)
 /* Get points along an arc segment at specified steps
 
-Contract: len(steps)=len_points; len(out_points)=len_points
+Contract: len(steps)=len_points; len(out_points)=len_points;
 */
 {
     double cx = seg->data[0];
@@ -163,7 +163,7 @@ double geom2d_ellipse_segment_get_length(const G2DSegment *seg)
 void geom2d_rectangle_to_path(double halfwidth, double halfheight, G2DSegment *out_segments)
 /* Create a path for a rectangle centered at (0,0)
 
-Contract: len(out_segments)=4
+Contract: len(out_segments)=4;
 */
 {
     out_segments[0].type = 0; /* line */
@@ -194,7 +194,7 @@ Contract: len(out_segments)=4
 void geom2d_ellipse_to_path(double rx, double ry, G2DSegment *out_segment)
 /* Create a path for an ellipse centered at (0,0)
 
-Contract: len(out_segments) must be at least 1
+Contract: len(out_segments)=1;
 */
 {
     out_segment[0].type = 3;      /* arc */
@@ -210,8 +210,7 @@ Contract: len(out_segments) must be at least 1
 void geom2d_rectellipse_to_path(double halfwidth, double halfheight, double rx, double ry, G2DSegment *out_segments, int *out_len)
 /* Create a path for the intersection between a reactangle and an ellipse
 
-Contract: len(out_segments) must be at least 8
-Post-contract: len(out_segments)=out_len
+Contract: len(out_segments)=8; postlen(out_segments)=out_len;
 */
 {
     double arg1 = halfwidth / rx;
@@ -359,7 +358,7 @@ Post-contract: len(out_segments)=out_len
 
 int geom2d_path_get_len_steps(const G2DSegment *segments, int len_segments, double ds_min){
 /* Get points along a path defined by segments
-Contract: len(segments)=len_segments
+Contract: len(segments)=len_segments;
 */
     int total_steps = 1;
     int nsteps;
@@ -388,7 +387,7 @@ Contract: len(segments)=len_segments
 double geom2d_path_get_length(const G2DSegment *segments, int len_segments){
 /* Get length of a path defined by segments
 
-Contract: len_segments=len(segments)
+Contract: len_segments=len(segments);
 */
     double total_length = 0.0;
     for (int i = 0; i < len_segments; i++)
@@ -414,7 +413,7 @@ Contract: len_segments=len(segments)
 void geom2d_path_get_steps(const G2DSegment *segments, int len_segments, double ds_min, double *out_steps){
 /* Get steps along a path defined by segments
 
-Contract: len_segments=len(segments); len(out_steps)=geom2d_path_get_len_steps(segments,len_segments,ds_min)
+Contract: len_segments=len(segments); len(out_steps)=geom2d_path_get_len_steps(segments,len_segments,ds_min);
 */
     int max_len = geom2d_path_get_len_steps(segments, len_segments, ds_min);
     double total_length = 0.0;
@@ -471,8 +470,7 @@ void geom2d_path_from_circle(double r, G2DPath *path)
 void geom2d_segments_from_rectellipse(double halfwidth, double halfheight, double rx, double ry, G2DSegment *out_segments, int *out_len)
 /* Create a path for the intersection between a rectangle and an ellipse
 
-Contract: len(out_segments)=8
-Post-contract: len(out_segments)=out_len
+Contract: len(out_segments)=8; postlen(out_segments)=out_len;
 */
 {
     /* populate only 4 segments for the test */

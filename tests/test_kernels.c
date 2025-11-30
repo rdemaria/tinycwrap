@@ -6,7 +6,7 @@
 double dot(const double *restrict x, const double *restrict y, int len_x)
 /* Return dot product between x and y
 
-Contract: len_x=len(x)
+Contract: len_x=len(x);
 */
 {
     double acc = 0.0;
@@ -28,7 +28,7 @@ Contract: len_x=len(x); len(out_x)=len_x;
 void mat_add(const double *restrict a, const double *restrict b, int n, int m, double *restrict out)
 /* Elementwise addition of two n x m matrices
 
-Contract: n,m = shape(a); shape(b)=n,m; shape(out)=n,m;
+Contract: n,m=shape(a); shape(b)=n,m; shape(out)=n,m;
 */
 {
     for (int i = 0; i < n; ++i) {
@@ -114,8 +114,7 @@ double geom2d_norm(double x, double y)
 void merge_sorted(const double *restrict a, const double *restrict b, int len_a, int len_b, double *out, int *out_len)
 /* Return array with not repeated ascending values from a and b that are assumed to be sorted
 
-Contract: len_a=len(a); len_b=len(b); len(out)=len_a+len_b;
-Post-Contract: len(out)=out_len;
+Contract: len_a=len(a); len_b=len(b); len(out)=len_a+len_b; postlen(out)=out_len;
 */
 {
     int ia = 0, ib = 0, k = 0;
@@ -160,8 +159,7 @@ Post-Contract: len(out)=out_len;
 double *alloc_random_array(int *out_len)
 /* Allocate an array with random-ish length
 
-Own: return
-Contract: len(return)=out_len
+Contract: len(return)=out_len; own(return);
 */
 {
     int n = (int)(rand() % 5 + 3); /* length between 3 and 7 */

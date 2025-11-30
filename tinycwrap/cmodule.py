@@ -439,45 +439,71 @@ class CModule:
             fspec.doc = doc
             contracts = []
             owns: list[str] = []
+
+            def _normalize_shape_expr(expr: str) -> str:
+                expr = expr.strip()
+                if "," in expr and not expr.startswith("("):
+                    expr = f"({expr})"
+                return expr
+
+            contract_items: list[str] = []
             for line in doc.splitlines():
-                m_contract = re.search(r"(post-)?contract:\s*(.*)", line, flags=re.IGNORECASE)
-                if not m_contract:
-                    m_own = re.search(r"own:\s*(.*)", line, flags=re.IGNORECASE)
-                    if m_own:
-                        for name in m_own.group(1).split(","):
-                            n = name.strip()
-                            if n:
-                                owns.append(n)
+                m_contract = re.search(r"contracts?\s*:\s*(.*)", line, flags=re.IGNORECASE)
+                if m_contract:
+                    after = m_contract.group(1)
+                    for part in after.split(";"):
+                        part = part.strip()
+                        if part:
+                            contract_items.append(part)
                     continue
-                is_post = m_contract.group(1) is not None
-                after = m_contract.group(2)
-                for part in after.split(";"):
-                    part = part.strip()
-                    if not part:
-                        continue
-                    mshape_out = re.match(r"shape\((\w+)\)\s*=\s*(.+)", part, flags=re.IGNORECASE)
-                    if mshape_out:
-                        target = f"shape({mshape_out.group(1)})"
-                        expr = mshape_out.group(2).strip()
-                        if "," in expr and not expr.startswith("("):
-                            expr = f"({expr})"
-                        contracts.append((target, expr, is_post))
-                        continue
-                    mshape_in = re.match(r"(.+?)\s*=\s*shape\((\w+)\)", part, flags=re.IGNORECASE)
-                    if mshape_in:
-                        targets_raw = mshape_in.group(1)
-                        arr_name = mshape_in.group(2)
-                        targets = [t.strip() for t in targets_raw.split(",") if t.strip()]
-                        for idx, tgt in enumerate(targets):
-                            contracts.append((tgt, f"shape({arr_name})[{idx}]", is_post))
-                        continue
-                    mlen = re.match(r"len\((\w+)\)\s*=\s*(.+)", part)
-                    if not mlen:
-                        mlen = re.match(r"(\w+)\s*=\s*(.+)", part)
-                    if mlen:
-                        target = mlen.group(1)
-                        expr = mlen.group(2).strip()
-                        contracts.append((target, expr, is_post))
+                m_own = re.search(r"own:\s*(.*)", line, flags=re.IGNORECASE)
+                if m_own:
+                    for name in m_own.group(1).split(","):
+                        n = name.strip()
+                        if n:
+                            owns.append(n)
+
+            for item in contract_items:
+                entry = item.strip()
+                if not entry:
+                    continue
+                m_own_call = re.match(r"own\s*\(\s*([^)]+)\s*\)\s*$", entry, flags=re.IGNORECASE)
+                if m_own_call:
+                    for name in m_own_call.group(1).split(","):
+                        n = name.strip()
+                        if n:
+                            owns.append(n)
+                    continue
+                is_post = False
+                m_post = re.match(r"post\s*(.+)", entry, flags=re.IGNORECASE)
+                if m_post and (m_post.group(1).strip().lower().startswith("len(") or m_post.group(1).strip().lower().startswith("shape(")):
+                    is_post = True
+                    entry = m_post.group(1).strip()
+                mshape_out = re.match(r"shape\((\w+)\)\s*=\s*(.+)", entry, flags=re.IGNORECASE)
+                if mshape_out:
+                    target = f"shape({mshape_out.group(1)})"
+                    expr = _normalize_shape_expr(mshape_out.group(2))
+                    contracts.append((target, expr, is_post))
+                    continue
+                mshape_in = re.match(r"(.+?)\s*=\s*shape\((\w+)\)", entry, flags=re.IGNORECASE)
+                if mshape_in:
+                    targets_raw = mshape_in.group(1)
+                    arr_name = mshape_in.group(2)
+                    targets = [t.strip() for t in targets_raw.split(",") if t.strip()]
+                    for idx, tgt in enumerate(targets):
+                        contracts.append((tgt, f"shape({arr_name})[{idx}]", is_post))
+                    continue
+                mlen = re.match(r"len\((\w+)\)\s*=\s*(.+)", entry, flags=re.IGNORECASE)
+                if mlen:
+                    target = mlen.group(1)
+                    expr = mlen.group(2).strip()
+                    contracts.append((target, expr, is_post))
+                    continue
+                mgeneric = re.match(r"(\w+)\s*=\s*(.+)", entry)
+                if mgeneric:
+                    target = mgeneric.group(1)
+                    expr = mgeneric.group(2).strip()
+                    contracts.append((target, expr, is_post))
             fspec.contracts = contracts or None
             fspec.owns = owns or None
 
