@@ -455,6 +455,22 @@ class CModule:
                     part = part.strip()
                     if not part:
                         continue
+                    mshape_out = re.match(r"shape\((\w+)\)\s*=\s*(.+)", part, flags=re.IGNORECASE)
+                    if mshape_out:
+                        target = f"shape({mshape_out.group(1)})"
+                        expr = mshape_out.group(2).strip()
+                        if "," in expr and not expr.startswith("("):
+                            expr = f"({expr})"
+                        contracts.append((target, expr, is_post))
+                        continue
+                    mshape_in = re.match(r"(.+?)\s*=\s*shape\((\w+)\)", part, flags=re.IGNORECASE)
+                    if mshape_in:
+                        targets_raw = mshape_in.group(1)
+                        arr_name = mshape_in.group(2)
+                        targets = [t.strip() for t in targets_raw.split(",") if t.strip()]
+                        for idx, tgt in enumerate(targets):
+                            contracts.append((tgt, f"shape({arr_name})[{idx}]", is_post))
+                        continue
                     mlen = re.match(r"len\((\w+)\)\s*=\s*(.+)", part)
                     if not mlen:
                         mlen = re.match(r"(\w+)\s*=\s*(.+)", part)
@@ -813,8 +829,18 @@ class CModule:
 
         contract_map: dict[str, str] = {}
         post_contract_map: dict[str, str] = {}
+        shape_contract_map: dict[str, str] = {}
+        post_shape_contract_map: dict[str, str] = {}
         if getattr(fspec, "contracts", None):
             for target, expr, is_post in fspec.contracts:
+                is_shape = target.startswith("shape(") and target.endswith(")")
+                if is_shape:
+                    arr_name = target[len("shape(") : -1]
+                    if is_post:
+                        post_shape_contract_map[arr_name] = expr
+                    else:
+                        shape_contract_map[arr_name] = expr
+                    continue
                 if is_post:
                     post_contract_map[target] = expr
                 else:
@@ -848,6 +874,7 @@ class CModule:
         def _expr_py(expr: str) -> str:
             expr = expr.strip()
             expr = re.sub(r"len\((\w+)\)", r"len(arr_\1)", expr)
+            expr = re.sub(r"shape\((\w+)\)", r"np.shape(arr_\1)", expr)
             for name in pointer_scalar_names:
                 expr = re.sub(rf"\b{name}\b", f"int(arr_{name}.ravel()[0])", expr)
                 expr = re.sub(rf"\b{name}\b", f"scalar_{name}", expr)
@@ -952,6 +979,8 @@ class CModule:
                 else:
                     dtype_expr = f"np.dtype('{np.dtype(numpy_dtype_for_base_type(a.base_type)).name}')"
                 ref_name = a.name[4:] if a.name.lower().startswith("out_") else None
+                shape_expr = shape_contract_map.get(a.name)
+                len_expr = contract_map.get(a.name)
                 out_lines += [
                     f"    base_dtype = {dtype_expr}",
                     f"    if {a.name} is None:",
@@ -960,12 +989,18 @@ class CModule:
                     out_lines += [
                         f"        arr_{a.name} = np.zeros({int(a.array_len)}, dtype=base_dtype)"
                     ]
-                elif a.name in contract_map:
-                    expr_py = _expr_py(contract_map[a.name])
+                elif shape_expr is not None:
+                    expr_py = _expr_py(shape_expr)
+                    out_lines += [
+                        f"        _shape_{a.name} = tuple({expr_py})",
+                        f"        arr_{a.name} = np.zeros(_shape_{a.name}, dtype=base_dtype)",
+                    ]
+                elif len_expr is not None:
+                    expr_py = _expr_py(len_expr)
                     out_lines += [
                         f"        arr_{a.name} = np.zeros(int({expr_py}), dtype=base_dtype)"
                     ]
-                elif a.array_len is None and a.name not in contract_map:
+                elif a.array_len is None and len_expr is None and shape_expr is None:
                     out_lines += [
                         f"        arr_{a.name} = np.zeros((), dtype=base_dtype)"
                     ]
@@ -984,6 +1019,15 @@ class CModule:
                 out_lines += [
                     "    else:",
                     f"        arr_{a.name} = np.ascontiguousarray({a.name}, dtype=base_dtype)",
+                ]
+                if shape_expr is not None:
+                    expr_py = _expr_py(shape_expr)
+                    out_lines += [
+                        f"        _expected_shape_{a.name} = tuple({expr_py})",
+                        f"        if arr_{a.name}.shape != _expected_shape_{a.name}:",
+                        f"            arr_{a.name} = np.reshape(arr_{a.name}, _expected_shape_{a.name})",
+                    ]
+                out_lines += [
                     f"    ptr_{a.name} = _self._ffi.cast('{a.base_type} *', _self._ffi.from_buffer(arr_{a.name}))",
                 ]
                 arg_call_args[idx] = f"ptr_{a.name}"
@@ -1141,6 +1185,9 @@ class CModule:
                     if out_name in scalar_names:
                         expr_py = expr_py.replace(out_name, f"scalar_{out_name}")
                     ret_expr = ret_expr.replace(out_var, f"({out_var})[:int({expr_py})]")
+                elif out_name in post_shape_contract_map:
+                    expr_py = _expr_py(post_shape_contract_map[out_name])
+                    ret_expr = ret_expr.replace(out_var, f"np.reshape({out_var}, tuple({expr_py}))")
             if pointer_scalar_outputs:
                 scalars = [
                     f"scalar_{n}"

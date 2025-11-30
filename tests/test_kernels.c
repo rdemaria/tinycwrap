@@ -25,6 +25,20 @@ Contract: len_x=len(x); len(out_x)=len_x;
         out_x[i] = alpha * x[i];
 }
 
+void mat_add(const double *restrict a, const double *restrict b, int n, int m, double *restrict out)
+/* Elementwise addition of two n x m matrices
+
+Contract: n,m = shape(a); shape(b)=n,m; shape(out)=n,m;
+*/
+{
+    for (int i = 0; i < n; ++i) {
+        for (int j = 0; j < m; ++j) {
+            int idx = i * m + j;
+            out[idx] = a[idx] + b[idx];
+        }
+    }
+}
+
 void cross(const double *restrict a, const double *restrict b, double *restrict out)
 /* Compute the cross product between 3D vectors a and b, store the result in out 
 

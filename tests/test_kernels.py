@@ -33,6 +33,20 @@ def test_scale_explicit_output(cm):
     np.testing.assert_allclose(scaled_explicit, x * 2.0)
 
 
+def test_mat_add_shape_contract(cm):
+    a = np.arange(6, dtype=np.float64).reshape(2, 3)
+    b = np.ones_like(a)
+    out = cm.mat_add(a, b)
+    assert out.shape == (2, 3)
+    np.testing.assert_allclose(out, a + b)
+
+    flat = np.zeros(a.size, dtype=np.float64)
+    reshaped = cm.mat_add(a, b, out=flat)
+    assert reshaped.shape == (2, 3)
+    np.testing.assert_allclose(reshaped, a + b)
+    np.testing.assert_allclose(flat.reshape(a.shape), a + b)
+
+
 def test_struct_wrapper(cm):
     cp = cm.ComplexPair(real=1.5, imag=-2.5)
     assert repr(cp) == "ComplexPair(real=1.5, imag=-2.5)"
