@@ -665,7 +665,6 @@ class CModule:
         Build the Python source string for a wrapper with an explicit signature.
         Keeping this separate allows inspection/debugging of the generated code.
         """
-        src_parts: list[str] = []
         func_text = self._function_source(fspec.name)
         if func_text:
             c_source_text = func_text
