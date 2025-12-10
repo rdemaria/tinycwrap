@@ -240,7 +240,8 @@ def _parse_functions_regex(cdef: str) -> dict[str, FuncSpec]:
             decls.append(decl)
             buff = []
 
-    func_re = re.compile(r"(.+?)\s+(\w+)\s*\((.*?)\)\s*;")
+    # allow pointer-return functions where the * may be glued to the name
+    func_re = re.compile(r"(.+?)\s+(\*?\w+)\s*\((.*?)\)\s*;")
 
     funcs: dict[str, FuncSpec] = {}
     for decl in decls:
@@ -249,6 +250,12 @@ def _parse_functions_regex(cdef: str) -> dict[str, FuncSpec]:
             continue
         ret_ctype, fname, arglist = m.groups()
         ret_ctype = ret_ctype.strip()
+        fname = fname.strip()
+        # handle prototypes like `double *fn(...)` where `*` attaches to the name
+        if fname.startswith("*"):
+            star_count = len(fname) - len(fname.lstrip("*"))
+            fname = fname.lstrip("*")
+            ret_ctype = f"{ret_ctype} {'*' * star_count}".strip()
         arglist = arglist.strip()
 
         argspecs: list[ArgSpec] = []
@@ -305,6 +312,9 @@ def _parse_structs_regex(cdef: str) -> dict[str, StructSpec]:
         name = m.group("name")
         fields: list[StructField] = []
         body_clean = re.sub(r"\bstruct\b", "", body)
+        # Strip C++-style comments before splitting fields so inline comments
+        # don't swallow subsequent declarations (e.g., "double x; // comment\n double y;").
+        body_clean = re.sub(r"//.*?$", "", body_clean, flags=re.MULTILINE)
         for line in body_clean.split(";"):
             line = line.strip()
             if not line:

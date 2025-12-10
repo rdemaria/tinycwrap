@@ -1,8 +1,8 @@
 #pragma once
 
 typedef struct {
-    double real;
-    double imag;
+    double real; // real part
+    double imag; // imaginary part
 } ComplexPair;
 
 typedef struct {
