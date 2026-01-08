@@ -100,6 +100,7 @@ Rules are parsed case-insensitively; whitespace does not matter.
 ## Python wrapper behavior
 
 - **Automatic allocation**: any `out_*` argument defaults to `None` in Python; TinyCWrap allocates it based on contracts, fixed array sizes, or by matching the shape of a related input (`out_x` matches `x` when no contract is present).
+- **Struct pointer outputs**: non-const struct pointers are treated as in/out; when you pass an object/array explicitly, it is mutated in place and not returned. When you pass `None`, TinyCWrap allocates and returns the struct (or struct array).
 - **Optional length arguments**: integer length parameters inferred from contracts default to `None` in the wrapper signature. If you pass them, they are cast to `int`; if not, the expression from the contract is evaluated.
 - **Post contracts**: when a contract uses `postlen(...)` or `post shape(...)`, the wrapper slices/reshapes outputs after the C call using the values written by the C function.
 - **Scalar pointer outputs**: pointers to integer-like types (e.g., `int *out_len`) are returned as plain Python integers alongside other outputs.

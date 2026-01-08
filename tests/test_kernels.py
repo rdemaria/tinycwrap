@@ -66,6 +66,14 @@ def test_struct_argument(cm):
     assert np.isclose(mag_sq, 5.0)
 
 
+def test_struct_pointer_inplace_no_return(cm):
+    cp = cm.ComplexPair(real=2.0, imag=-3.0)
+    res = cm.scale_complex(cp, 2.0)
+    assert res is None
+    assert cp.real == 4.0
+    assert cp.imag == -6.0
+
+
 def test_struct_array_member(cm):
     p = cm.Particle()
     p.pos = [1.0, 2.0, 3.0]
@@ -112,7 +120,14 @@ def test_owned_array(cm):
 def test_struct_output_array(cm):
     n = 4
     particles = cm.Particle.zeros(n)
-    out_particles = cm.make_particles(3.0, out_p=particles, len_p=n)
-    np.testing.assert_array_equal(out_particles, particles)
+    res = cm.make_particles(3.0, out_p=particles, len_p=n)
+    assert res is None
     np.testing.assert_allclose(particles["pos"], np.ones((n, 3)))
     np.testing.assert_allclose(particles["vel"], np.array([[3.0, 0.0, 0.0]] * n))
+
+
+def test_struct_output_array_auto_return(cm):
+    n = 3
+    particles = cm.make_particles(2.5, len_p=n)
+    np.testing.assert_allclose(particles["pos"], np.ones((n, 3)))
+    np.testing.assert_allclose(particles["vel"], np.array([[2.5, 0.0, 0.0]] * n))
