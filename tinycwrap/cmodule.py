@@ -923,6 +923,7 @@ class CModule:
         call_args: list[str] = []
         output_vars: list[str] = []
         output_names: list[str] = []
+        output_conditions: dict[str, str] = {}
         pointer_scalar_outputs: list[tuple[str, str]] = []
         struct_scalar_outputs: list[tuple[str, str, str]] = []
         pre_lines: list[str] = []
@@ -1009,6 +1010,12 @@ class CModule:
                 len_expr = contract_map.get(a.name)
                 out_lines += [
                     f"    base_dtype = {dtype_expr}",
+                ]
+                if a.base_type in struct_names:
+                    out_lines += [
+                        f"    _ret_{a.name} = {a.name} is None",
+                    ]
+                out_lines += [
                     f"    if {a.name} is None:",
                 ]
                 if a.array_len is not None:
@@ -1058,6 +1065,8 @@ class CModule:
                 ]
                 arg_call_args[idx] = f"ptr_{a.name}"
                 output_names.append(a.name)
+                if a.base_type in struct_names:
+                    output_conditions[a.name] = f"_ret_{a.name}"
                 if a.name in pointer_scalar_names:
                     pointer_scalar_outputs.append((a.name, f"arr_{a.name}"))
                 else:
@@ -1084,6 +1093,7 @@ class CModule:
                     ]
                 else:
                     out_lines += [
+                        f"    _ret_{a.name} = {a.name} is None",
                         f"    if {a.name} is None:",
                         f"        obj_{a.name} = _struct_classes['{a.base_type}']()",
                         f"        arr_{a.name} = obj_{a.name}._data",
@@ -1096,6 +1106,7 @@ class CModule:
                         f"    ptr_{a.name} = _self._ffi.cast('{a.base_type} *', _self._ffi.from_buffer(arr_{a.name}))",
                     ]
                     output_names.append(a.name)
+                    output_conditions[a.name] = f"_ret_{a.name}"
                     output_vars.append(f"obj_{a.name} if obj_{a.name} is not None else arr_{a.name}")
                 arg_call_args[idx] = f"ptr_{a.name}"
             elif a.is_scalar and not a.is_length_param and arg_call_args[idx] is None:
@@ -1131,6 +1142,7 @@ class CModule:
         pairs_sorted = sorted(pairs, key=lambda p: 1 if p[1] in pointer_scalar_map else 0)
         output_names_reordered: list[str] = []
         output_vars_final: list[str] = []
+        output_conditions_final: list[str | None] = []
         for name, ov in pairs_sorted:
             output_names_reordered.append(name)
             if ov in struct_scalar_map:
@@ -1140,10 +1152,26 @@ class CModule:
                 output_vars_final.append(pointer_scalar_map[ov][1])
             else:
                 output_vars_final.append(ov)
+            output_conditions_final.append(output_conditions.get(name))
 
         own_return_len_expr = None
         if own_return and contract_map.get("return"):
             own_return_len_expr = _expr_py(contract_map["return"])
+
+        output_value_exprs = list(output_vars_final)
+        if output_value_exprs:
+            scalar_names = {n for n, _ in pointer_scalar_outputs}
+            for idx, (out_name, out_var) in enumerate(
+                zip(output_names_reordered, output_value_exprs)
+            ):
+                if out_name in post_contract_map:
+                    expr_py = _expr_py(post_contract_map[out_name])
+                    if out_name in scalar_names:
+                        expr_py = expr_py.replace(out_name, f"scalar_{out_name}")
+                    output_value_exprs[idx] = f"({out_var})[:int({expr_py})]"
+                elif out_name in post_shape_contract_map:
+                    expr_py = _expr_py(post_shape_contract_map[out_name])
+                    output_value_exprs[idx] = f"np.reshape({out_var}, tuple({expr_py}))"
 
         if own_return:
             base_ret = base_type_from_ctype(fspec.return_ctype)
@@ -1175,80 +1203,60 @@ class CModule:
                 lines.append(
                     f"    arr_ret = np.frombuffer(_self._ffi.buffer(res_buf, int({own_return_len_expr}) * np.dtype({ret_dtype_expr}).itemsize), dtype={ret_dtype_expr})"
                 )
-            ret_parts: list[str] = ["arr_ret"]
-            if output_vars_final:
-                for v in output_vars_final:
-                    if v not in ret_parts:
-                        ret_parts.append(v)
-            # append any scalar lengths not already in ret_parts
+            lines.append("    _ret_vals = []")
+            lines.append("    _ret_names = set()")
+            if output_value_exprs:
+                for out_name, ov, cond in zip(
+                    output_names_reordered, output_value_exprs, output_conditions_final
+                ):
+                    if cond:
+                        lines.append(f"    if {cond}:")
+                        lines.append(f"        _ret_vals.append({ov})")
+                        lines.append(f"        _ret_names.add('{out_name}')")
+                    else:
+                        lines.append(f"    _ret_vals.append({ov})")
+                        lines.append(f"    _ret_names.add('{out_name}')")
+            lines.append("    ret_parts = [arr_ret]")
+            lines.append("    if _ret_vals:")
+            lines.append("        ret_parts.extend(_ret_vals)")
             for name, _arr in pointer_scalar_outputs:
-                sval = f"scalar_{name}"
-                if sval not in ret_parts:
-                    ret_parts.append(sval)
-            if len(ret_parts) == 1:
-                ret_expr = ret_parts[0]
-            else:
-                ret_expr = "(" + ", ".join(ret_parts) + ")"
-            lines.append(f"    return {ret_expr}")
+                lines.append(f"    if '{name}' not in _ret_names:")
+                lines.append(f"        ret_parts.append(scalar_{name})")
+                lines.append(f"        _ret_names.add('{name}')")
+            lines.append("    if len(ret_parts) == 1:")
+            lines.append("        return ret_parts[0]")
+            lines.append("    return tuple(ret_parts)")
             return "\n".join(lines)
 
-        if output_vars_final:
-            if ret_type == "void":
-                if len(output_vars_final) == 1:
-                    ret_expr = output_vars_final[0]
+        lines.append("    _ret_vals = []")
+        lines.append("    _ret_names = set()")
+        if output_value_exprs:
+            for out_name, ov, cond in zip(
+                output_names_reordered, output_value_exprs, output_conditions_final
+            ):
+                if cond:
+                    lines.append(f"    if {cond}:")
+                    lines.append(f"        _ret_vals.append({ov})")
+                    lines.append(f"        _ret_names.add('{out_name}')")
                 else:
-                    ret_expr = "(" + ", ".join(output_vars_final) + ")"
-            else:
-                if len(output_vars_final) == 1:
-                    ret_expr = f"{output_vars_final[0]}, res"
-                else:
-                    ret_expr = "(" + ", ".join(output_vars_final) + "), res"
-            # apply post-contract slicing using scalar lengths if available
-            for out_name, out_var in zip(output_names_reordered, output_vars_final):
-                if out_name in post_contract_map:
-                    expr_py = _expr_py(post_contract_map[out_name])
-                    scalar_names = {n for n, _ in pointer_scalar_outputs}
-                    if out_name in scalar_names:
-                        expr_py = expr_py.replace(out_name, f"scalar_{out_name}")
-                    ret_expr = ret_expr.replace(out_var, f"({out_var})[:int({expr_py})]")
-                elif out_name in post_shape_contract_map:
-                    expr_py = _expr_py(post_shape_contract_map[out_name])
-                    ret_expr = ret_expr.replace(out_var, f"np.reshape({out_var}, tuple({expr_py}))")
-            if pointer_scalar_outputs:
-                scalars = [
-                    f"scalar_{n}"
-                    for n, _ in pointer_scalar_outputs
-                    if f"scalar_{n}" not in output_vars_final
-                ]
-                if isinstance(ret_expr, str) and ret_expr.startswith("("):
-                    ret_expr = (
-                        ret_expr[:-1]
-                        + (", " if len(scalars) else "")
-                        + ", ".join(scalars)
-                        + ")"
-                    )
-                else:
-                    if len(scalars) == 1:
-                        ret_expr = (
-                            "(" + ret_expr + ", " + scalars[0] + ")"
-                            if ret_expr
-                            else scalars[0]
-                        )
-                    else:
-                        ret_expr = "(" + ret_expr + ", " + ", ".join(scalars) + ")"
-            lines.append(f"    return {ret_expr}")
+                    lines.append(f"    _ret_vals.append({ov})")
+                    lines.append(f"    _ret_names.add('{out_name}')")
+        for name, _arr in pointer_scalar_outputs:
+            lines.append(f"    if '{name}' not in _ret_names:")
+            lines.append(f"        _ret_vals.append(scalar_{name})")
+            lines.append(f"        _ret_names.add('{name}')")
+        if ret_type == "void":
+            lines.append("    if _ret_vals:")
+            lines.append("        if len(_ret_vals) == 1:")
+            lines.append("            return _ret_vals[0]")
+            lines.append("        return tuple(_ret_vals)")
+            lines.append("    return None")
         else:
-            if ret_type == "void":
-                lines.append("    return None")
-            else:
-                ret_expr = "res"
-                if pointer_scalar_outputs:
-                    scalars = [f"scalar_{n}" for n, _ in pointer_scalar_outputs]
-                    if len(scalars) == 1:
-                        ret_expr = f"({ret_expr}, {scalars[0]})"
-                    else:
-                        ret_expr = f"({ret_expr}, " + ", ".join(scalars) + ")"
-                lines.append(f"    return {ret_expr}")
+            lines.append("    if _ret_vals:")
+            lines.append("        if len(_ret_vals) == 1:")
+            lines.append("            return _ret_vals[0], res")
+            lines.append("        return tuple(_ret_vals), res")
+            lines.append("    return res")
 
         return "\n".join(lines)
 

@@ -57,6 +57,13 @@ double complex_magnitude(const ComplexPair *z)
     return sqrt(z->real * z->real + z->imag * z->imag);
 }
 
+void scale_complex(ComplexPair *z, double factor)
+/* Scale complex pair in place */
+{
+    z->real *= factor;
+    z->imag *= factor;
+}
+
 double kinetic_energy(const Particle *p, int len_p)
 /* Sum 0.5*|v|^2 over particles
 
