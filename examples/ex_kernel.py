@@ -1,7 +1,10 @@
+from pathlib import Path
+
 import numpy as np
 from tinycwrap import CModule
 
-cm = CModule("kernels.c")   # cdef auto-generated, wrappers auto-created
+here = Path(__file__).resolve().parent
+cm = CModule(here / "kernels.c")   # cdef auto-generated, wrappers auto-created
 
 x = np.arange(10, dtype=np.float64)
 y = np.ones_like(x)
