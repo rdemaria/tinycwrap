@@ -4,10 +4,7 @@
 #include "test_kernels.h"
 
 double dot(const double *restrict x, const double *restrict y, int len_x)
-/* Return dot product between x and y
-
-Contract: len_x=len(x);
-*/
+/* Return dot product between x and y */
 {
     double acc = 0.0;
     for (int i = 0; i < len_x; ++i)
@@ -16,13 +13,22 @@ Contract: len_x=len(x);
 }
 
 void scale(double *restrict x, double alpha, int len_x, double *restrict out_x)
-/* Scale vector x by alpha and store the result in out
-
-Contract: len_x=len(x); len(out_x)=len_x;
-*/
+/* Scale vector x by alpha and store the result in out */
 {
     for (int i = 0; i < len_x; ++i)
         out_x[i] = alpha * x[i];
+}
+
+double prefix_sum(const double *restrict x, int len_x)
+/* Sum the first len_x elements, keeping len_x visible in Python.
+
+Contract: expose(len_x);
+*/
+{
+    double acc = 0.0;
+    for (int i = 0; i < len_x; ++i)
+        acc += x[i];
+    return acc;
 }
 
 void mat_add(const double *restrict a, const double *restrict b, int n, int m, double *restrict out)
@@ -84,10 +90,7 @@ Contract: len(out_pairs)=3;
 }
 
 double kinetic_energy(const Particle *p, int len_p)
-/* Sum 0.5*|v|^2 over particles
-
-Contract: len_p=len(p);
-*/
+/* Sum 0.5*|v|^2 over particles */
 {
     double sum = 0.0;
     for (int i = 0; i < len_p; ++i) {
@@ -115,10 +118,7 @@ Contract: len_inp=len(inp); len(out1)=len_inp/2; len(out2)=len_inp/2;
 }
 
 void make_particles(double speed, Particle *out_p, int len_p)
-/* Fill particles with unit positions and uniform speed on x
-
-Contract: len(out_p)=len_p;
-*/
+/* Fill particles with unit positions and uniform speed on x */
 {
     for (int i = 0; i < len_p; ++i) {
         out_p[i].pos[0] = 1.0;

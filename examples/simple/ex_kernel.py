@@ -13,6 +13,6 @@ print(cm.dot(x, y))   # -> 45.0
 print(cm.dot.__doc__)          # shows your C comment as docstring
 print(cm.dot.__source__)          # shows your C comment as docstring
 
-print(cm.scale(x, 2.2)) 
+print(cm.scale(x, 2.2))
 out = np.empty_like(x)
 print(cm.scale(x, 3.3, out_x=out))

@@ -12,6 +12,7 @@ typedef struct {
 
 double dot(const double *restrict x, const double *restrict y, int len_x);
 void scale(double *restrict x, double alpha, int len_x, double *restrict out_x);
+double prefix_sum(const double *restrict x, int len_x);
 void mat_add(const double *restrict a, const double *restrict b, int n, int m, double *restrict out);
 void cross(const double *restrict a, const double *restrict b, double *restrict out);
 double complex_magnitude(const ComplexPair *z);

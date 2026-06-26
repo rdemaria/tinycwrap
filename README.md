@@ -18,9 +18,7 @@ Write a small C file (only non-`static` functions are exported):
 ```c
 /* kernels.c */
 double dot(const double *x, const double *y, int len_x)
-/* Return dot product between x and y
-   Contract: len_x=len(x);
-*/
+/* Return dot product between x and y */
 {
     double acc = 0.0;
     for (int i = 0; i < len_x; ++i)
@@ -40,7 +38,7 @@ cm = CModule("kernels.c")  # builds the shared library, creates wrappers
 x = np.arange(5, dtype=np.float64)
 y = np.ones_like(x)
 
-cm.dot(x, y)           # -> 10.0, len_x auto-filled by the contract
+cm.dot(x, y)           # -> 10.0, len_x auto-filled by convention
 print(cm.dot.__doc__)  # docstring comes from the C comment
 ```
 
@@ -55,7 +53,7 @@ TinyCWrap infers how to build wrappers from simple C conventions:
   - `T *arg` -> output/in-place array (prefer naming it `out_*` when possible).
   - `T arg[N]` in the signature -> fixed-size array (input if `const`, otherwise output).
   - Plain scalars (`double`, `int`, ...) -> Python scalars.
-- **Length parameters**: integers such as `len_x`, `n`, `size_x` can be auto-filled if you declare a contract (see below). Otherwise pass them explicitly from Python.
+- **Length parameters**: integers named like `len_x`, `n_x`, or `size_x` are auto-filled from array `x` by convention. Otherwise pass them explicitly from Python or declare a contract (see below).
 - **Docstrings**: the block comment immediately after the function header becomes the Python docstring.
 - **Structs**: `typedef struct { ... } Name;` definitions in your headers/sources become Python classes with a `.dtype` and NumPy-backed storage.
 - **Compilation**: extra sources can be passed (`CModule("main.c", "helper.c")`), and extra include dirs via `include_dirs=[...]`. Default compiler flags are `-O3 -shared -fPIC -march=native -mtune=native` plus the NumPy include path.
@@ -69,6 +67,15 @@ Contracts are declared inside the doc comment with `Contract:` (or `Contracts:`)
 - `len(out)=len_x` — allocate a 1D output array.
 - `postlen(out)=out_len` — slice the output after the call using an integer pointer result `out_len` (useful when the C code writes less than the allocated length).
 - `own(return)` — the returned pointer is owned by the caller; the wrapper will `free` it after copying to NumPy (requires a `len(return)=...` contract).
+- `expose(len_x)` — opt out of naming-convention inference for `len_x`, keeping it as a required Python argument.
+
+TinyCWrap also infers low-risk contracts from names:
+
+- `len_x`, `n_x`, or `size_x` are treated as `len(x)` when `x` is an array argument.
+- `out_x` is allocated with `shape(x)` when input array `x` exists.
+- `out_x` is allocated with `len_x`, `n_x`, or `size_x` when no input `x` exists but such a length argument does.
+
+Explicit contracts override inferred contracts.
 
 Examples pulled from the test suite:
 
@@ -99,9 +106,9 @@ Rules are parsed case-insensitively; whitespace does not matter.
 
 ## Python wrapper behavior
 
-- **Automatic allocation**: any `out_*` argument defaults to `None` in Python; TinyCWrap allocates it based on contracts, fixed array sizes, or by matching the shape of a related input (`out_x` matches `x` when no contract is present).
+- **Automatic allocation**: any `out_*` argument defaults to `None` in Python; TinyCWrap allocates it based on contracts, naming conventions, fixed array sizes, or by matching the shape of a related input (`out_x` matches `x` when no contract is present).
 - **Struct pointer outputs**: non-const struct pointers are treated as in/out; when you pass an object/array explicitly, it is mutated in place and not returned. When you pass `None`, TinyCWrap allocates and returns the struct (or struct array).
-- **Optional length arguments**: integer length parameters inferred from contracts default to `None` in the wrapper signature. If you pass them, they are cast to `int`; if not, the expression from the contract is evaluated.
+- **Optional length arguments**: integer length parameters inferred from contracts or naming conventions default to `None` in the wrapper signature. If you pass them, they are cast to `int`; if not, the inferred expression is evaluated.
 - **Post contracts**: when a contract uses `postlen(...)` or `post shape(...)`, the wrapper slices/reshapes outputs after the C call using the values written by the C function.
 - **Scalar pointer outputs**: pointers to integer-like types (e.g., `int *out_len`) are returned as plain Python integers alongside other outputs.
 - **Structs**: for `typedef struct` declarations TinyCWrap generates a Python class:
@@ -164,7 +171,7 @@ arr, n = cm.alloc_random_array()  # returns NumPy array, frees the C buffer
 ## Tips
 
 - Keep function declarations (or headers) visible at the top level; TinyCWrap scans the C files and headers you pass.
-- If a length cannot be inferred from a contract, you must pass it explicitly from Python.
+- If a length cannot be inferred from a naming convention or contract, you must pass it explicitly from Python.
 - Use `cm.<func>.__source__` to inspect the wrapper code if something behaves unexpectedly.
 - For debugging parsed signatures/contracts call `cm._debug_specs()`.
 

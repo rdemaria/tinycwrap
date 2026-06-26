@@ -73,6 +73,7 @@ class FuncSpec:
     doc: str | None = None
     contracts: list[tuple[str, str, bool]] | None = None
     owns: list[str] | None = None
+    exposes: set[str] | None = None
 
 
 @dataclass

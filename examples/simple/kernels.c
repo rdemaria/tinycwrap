@@ -2,10 +2,7 @@
 #include <math.h>
 
 double dot(const double *restrict x, const double *restrict y, int len_x)
-/* Return dot product between x and y
-
-Contract: len_x=len(x);
-*/
+/* Return dot product between x and y */
 {
     double acc = 0.0;
     for (int i = 0; i < len_x; ++i)
@@ -14,10 +11,7 @@ Contract: len_x=len(x);
 }
 
 void scale(double *restrict x, double alpha, int len_x, double *restrict out_x)
-/* Scale vector x by alpha and store the result in out
-
-Contract: len_x=len(x); len(out_x)=len_x;
-*/
+/* Scale vector x by alpha and store the result in out */
 {
     for (int i = 0; i < len_x; ++i)
         out_x[i] = alpha * x[i];

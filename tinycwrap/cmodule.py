@@ -169,6 +169,7 @@ class CModule:
         self._func_specs.pop("free", None)
         self._struct_specs = parse_structs_from_cdef(self._cdef)
         self._attach_docs_from_source()
+        self._infer_contracts_from_names()
         self._mark_length_params_from_contracts()
         self._create_struct_classes()
         self._create_wrappers()
@@ -448,6 +449,7 @@ class CModule:
             fspec.doc = doc
             contracts = []
             owns: list[str] = []
+            exposes: set[str] = set()
 
             def _normalize_shape_expr(expr: str) -> str:
                 expr = expr.strip()
@@ -483,6 +485,13 @@ class CModule:
                         if n:
                             owns.append(n)
                     continue
+                m_expose_call = re.match(r"expose\s*\(\s*([^)]+)\s*\)\s*$", entry, flags=re.IGNORECASE)
+                if m_expose_call:
+                    for name in m_expose_call.group(1).split(","):
+                        n = name.strip()
+                        if n:
+                            exposes.add(n)
+                    continue
                 is_post = False
                 m_post = re.match(r"post\s*(.+)", entry, flags=re.IGNORECASE)
                 if m_post and (m_post.group(1).strip().lower().startswith("len(") or m_post.group(1).strip().lower().startswith("shape(")):
@@ -515,6 +524,84 @@ class CModule:
                     contracts.append((target, expr, is_post))
             fspec.contracts = contracts or None
             fspec.owns = owns or None
+            fspec.exposes = exposes or None
+
+    @staticmethod
+    def _length_arg_target(arg_name: str) -> str | None:
+        for prefix in ("len_", "n_", "size_"):
+            if arg_name.startswith(prefix) and len(arg_name) > len(prefix):
+                return arg_name[len(prefix) :]
+        return None
+
+    @staticmethod
+    def _is_integer_arg(arg) -> bool:
+        return arg.base_type in (
+            "int",
+            "unsigned int",
+            "unsigned",
+            "long",
+            "long int",
+            "long long",
+            "long long int",
+            "unsigned long",
+            "unsigned long long",
+            "size_t",
+            "ssize_t",
+        )
+
+    def _infer_contracts_from_names(self):
+        """Infer low-risk contracts from conventional argument names."""
+        for fspec in self._func_specs.values():
+            contracts = list(fspec.contracts or [])
+            exposes = fspec.exposes or set()
+            explicit_targets = {target for target, _expr, _is_post in contracts}
+            explicit_shapes = {
+                target[len("shape(") : -1]
+                for target, _expr, _is_post in contracts
+                if target.startswith("shape(") and target.endswith(")")
+            }
+            arg_by_name = {a.name: a for a in fspec.args}
+            array_names = {
+                a.name
+                for a in fspec.args
+                if a.is_array_in or a.is_array_out or a.is_pointer or a.array_len is not None
+            }
+
+            for arg in fspec.args:
+                if arg.name in exposes or not self._is_integer_arg(arg):
+                    continue
+                target = self._length_arg_target(arg.name)
+                if target and target in array_names and arg.name not in explicit_targets:
+                    contracts.append((arg.name, f"len({target})", False))
+                    explicit_targets.add(arg.name)
+
+            length_names_by_target: dict[str, str] = {}
+            for arg in fspec.args:
+                target = self._length_arg_target(arg.name)
+                if target and self._is_integer_arg(arg):
+                    length_names_by_target[target] = arg.name
+
+            for arg in fspec.args:
+                if not (arg.is_array_out and arg.name.lower().startswith("out_")):
+                    continue
+                target = arg.name[4:]
+                if arg.name in explicit_targets or arg.name in explicit_shapes:
+                    continue
+                if target in arg_by_name and (
+                    arg_by_name[target].is_array_in
+                    or arg_by_name[target].is_array_out
+                    or arg_by_name[target].is_pointer
+                    or arg_by_name[target].array_len is not None
+                ):
+                    contracts.append((f"shape({arg.name})", f"shape({target})", False))
+                    explicit_shapes.add(arg.name)
+                    continue
+                length_name = length_names_by_target.get(target)
+                if length_name:
+                    contracts.append((arg.name, length_name, False))
+                    explicit_targets.add(arg.name)
+
+            fspec.contracts = contracts or None
 
     def _mark_length_params_from_contracts(self):
         """Mark length-like parameters based solely on explicit contracts."""
@@ -981,7 +1068,7 @@ class CModule:
             if a.is_array_out and a.name.lower().startswith("out"):
                 extra.append("auto if None")
             if a.is_length_param:
-                extra.append("auto from Contract")
+                extra.append("auto")
             extra_txt = f" [{' '.join(extra)}]" if extra else ""
             arg_docs.append(f"{a.name} : {ctype} ({role}){extra_txt}")
 
@@ -1194,22 +1281,23 @@ class CModule:
                     out_lines += [
                         f"        arr_{a.name} = np.zeros(int({expr_py}), dtype=base_dtype)"
                     ]
-                elif a.array_len is None and len_expr is None and shape_expr is None:
-                    out_lines += [
-                        f"        arr_{a.name} = np.zeros((), dtype=base_dtype)"
-                    ]
                 elif ref_name:
                     out_lines += [
                         f"        ref_arr = locals().get('arr_{ref_name}', None)",
                         "        if ref_arr is not None:",
                         f"            arr_{a.name} = np.zeros_like(ref_arr, dtype=base_dtype)",
                         "        else:",
-                        f"            raise ValueError('{fspec.name}: provide {a.name} or a Contract for its length')",
+                        f"            arr_{a.name} = np.zeros((), dtype=base_dtype)",
                     ]
                 else:
-                    out_lines += [
-                        f"        raise ValueError('{fspec.name}: provide {a.name} or a Contract for its length')",
-                    ]
+                    if a.array_len is None and len_expr is None and shape_expr is None:
+                        out_lines += [
+                            f"        arr_{a.name} = np.zeros((), dtype=base_dtype)"
+                        ]
+                    else:
+                        out_lines += [
+                            f"        raise ValueError('{fspec.name}: provide {a.name} or a Contract for its length')",
+                        ]
                 out_lines += [
                     "    else:",
                 ]

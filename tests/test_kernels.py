@@ -16,21 +16,28 @@ def cm():
 def test_dot(cm):
     x = np.array([1.0, 2.0, 3.0], dtype=np.float64)
     y = np.array([4.0, 5.0, 6.0], dtype=np.float64)
-    assert cm.dot(x, y, len_x=len(x)) == np.dot(x, y)
+    assert cm.dot(x, y) == np.dot(x, y)
 
 
 def test_scale_auto_output(cm):
     x = np.arange(10, dtype=np.float64)
-    scaled_auto = cm.scale(x, 1.1, len_x=len(x))
+    scaled_auto = cm.scale(x, 1.1)
     np.testing.assert_allclose(scaled_auto, x * 1.1)
 
 
 def test_scale_explicit_output(cm):
     x = np.arange(10, dtype=np.float64)
     out = np.empty_like(x)
-    scaled_explicit = cm.scale(x, 2.0, len_x=len(x), out_x=out)
+    scaled_explicit = cm.scale(x, 2.0, out_x=out)
     np.testing.assert_allclose(out, x * 2.0)
     np.testing.assert_allclose(scaled_explicit, x * 2.0)
+
+
+def test_expose_keeps_inferred_length_visible(cm):
+    x = np.arange(5, dtype=np.float64)
+    assert cm.prefix_sum(x, len_x=3) == 3.0
+    with pytest.raises(TypeError):
+        cm.prefix_sum(x)
 
 
 def test_mat_add_shape_contract(cm):
@@ -129,7 +136,7 @@ def test_struct_array_argument(cm):
     particles["vel"][0] = [1.0, 0.0, 0.0]
     particles["pos"][1] = [0.0, 0.0, 0.0]
     particles["vel"][1] = [0.0, 2.0, 0.0]
-    ke = cm.kinetic_energy(particles, len_p=len(particles))
+    ke = cm.kinetic_energy(particles)
     assert np.isclose(ke, 0.5 * (1.0 + 4.0))
 
 
