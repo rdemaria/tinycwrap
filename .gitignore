@@ -1,9 +1,33 @@
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+*.pdb
 *.so
 *.dll
 *.dylib
+.Python
+.venv/
+venv/
+env/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Vim
+*.swp
+*.swo
+*.swn
+.*.swp
+.*.swo
+.*.swn
+Session.vim
+
+# VS Code
+.vscode/
 
 # CModule build artifacts
 /tmp/cmodule_build/
