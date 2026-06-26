@@ -64,6 +64,25 @@ void scale_complex(ComplexPair *z, double factor)
     z->imag *= factor;
 }
 
+void midpoint_complex(const ComplexPair *a, const ComplexPair *b, ComplexPair *out_z)
+/* Fill out_z with the midpoint between a and b. */
+{
+    out_z->real = 0.5 * (a->real + b->real);
+    out_z->imag = 0.5 * (a->imag + b->imag);
+}
+
+void make_complex_pairs(ComplexPair *out_pairs)
+/* Fill an array of complex pairs
+
+Contract: len(out_pairs)=3;
+*/
+{
+    for (int i = 0; i < 3; ++i) {
+        out_pairs[i].real = (double)i;
+        out_pairs[i].imag = -(double)i;
+    }
+}
+
 double kinetic_energy(const Particle *p, int len_p)
 /* Sum 0.5*|v|^2 over particles
 

@@ -74,6 +74,45 @@ def test_struct_pointer_inplace_no_return(cm):
     assert cp.imag == -6.0
 
 
+def test_struct_scalar_output_returns_struct_object(cm):
+    a = cm.ComplexPair(real=2.0, imag=4.0)
+    b = cm.ComplexPair(real=6.0, imag=10.0)
+    mid = cm.midpoint_complex(a, b)
+    assert isinstance(mid, cm.ComplexPair)
+    assert mid.real == 4.0
+    assert mid.imag == 7.0
+
+    out = cm.ComplexPair()
+    res = cm.midpoint_complex(a, b, out_z=out)
+    assert res is None
+    assert out.real == 4.0
+    assert out.imag == 7.0
+
+
+def test_struct_array_output_returns_array_wrapper(cm):
+    pairs = cm.make_complex_pairs()
+    assert isinstance(pairs, cm.ComplexPairArray)
+    assert repr(pairs) == "<Array ComplexPair[3]>"
+    assert pairs.shape == (3,)
+    np.testing.assert_allclose(pairs.real, np.array([0.0, 1.0, 2.0]))
+    np.testing.assert_allclose(pairs.imag, np.array([0.0, -1.0, -2.0]))
+    np.testing.assert_allclose(pairs["real"], pairs.real)
+    assert isinstance(pairs[1], cm.ComplexPair)
+    assert pairs[1].real == 1.0
+    assert pairs[1].imag == -1.0
+
+
+def test_struct_array_initialization(cm):
+    from_array_like = cm.ComplexPairArray([(1.0, 2.0), (3.0, 4.0)])
+    assert isinstance(from_array_like[0], cm.ComplexPair)
+    np.testing.assert_allclose(from_array_like.real, [1.0, 3.0])
+    np.testing.assert_allclose(from_array_like.imag, [2.0, 4.0])
+
+    from_fields = cm.ComplexPairArray(real=[5.0, 6.0], imag=-1.0)
+    np.testing.assert_allclose(from_fields.real, [5.0, 6.0])
+    np.testing.assert_allclose(from_fields.imag, [-1.0, -1.0])
+
+
 def test_struct_array_member(cm):
     p = cm.Particle()
     p.pos = [1.0, 2.0, 3.0]

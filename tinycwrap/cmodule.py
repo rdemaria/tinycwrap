@@ -97,6 +97,7 @@ class CModule:
         self._struct_specs: dict[str, StructSpec] = {}
         self._struct_dtypes: dict[str, np.dtype] = {}
         self._struct_classes: dict[str, type] = {}
+        self._struct_array_classes: dict[str, type] = {}
         self._ipython_hook = None
         self._cdef: str | None = None
 
@@ -187,10 +188,18 @@ class CModule:
                         delattr(self, sname)
                     except Exception:
                         pass
+            for sname in list(self._struct_array_classes.keys()):
+                aname = f"{sname}Array"
+                if hasattr(self, aname):
+                    try:
+                        delattr(self, aname)
+                    except Exception:
+                        pass
             self._func_specs.clear()
             self._struct_specs.clear()
             self._struct_dtypes.clear()
             self._struct_classes.clear()
+            self._struct_array_classes.clear()
             self._ffi = None
             self._lib = None
             self._so_path = None
@@ -675,10 +684,23 @@ class CModule:
                     parts = ", ".join(parts_list)
                     return f"{spec.name}({parts})"
 
+                @classmethod
+                def _from_data(cls, data, copy=False):
+                    arr = np.asarray(data, dtype=dtype)
+                    if arr.shape != ():
+                        raise ValueError(f"{spec.name} expects scalar data, got shape {arr.shape}")
+                    if copy:
+                        arr = np.array(arr, dtype=dtype, copy=True)
+                    obj = cls()
+                    object.__setattr__(obj, "_data", arr)
+                    object.__setattr__(obj, "_children", {})
+                    return obj
+
                 namespace = {
                     "__slots__": slots,
                     "__init__": __init__,
                     "__repr__": __repr__,
+                    "_from_data": _from_data,
                     "__doc__": f"Python wrapper for C struct {spec.name}. Fields: {', '.join(dtype.names)}.",
                     "dtype": dtype,
                     "zeros": staticmethod(
@@ -721,10 +743,147 @@ class CModule:
 
                 return type(spec.name, (), namespace)
 
+            def make_struct_array_class(spec, dtype, struct_cls):
+                slots = ("_data",)
+                class_name = f"{spec.name}Array"
+
+                def __init__(self, data=None, copy=False, **kwargs):
+                    if data is not None and kwargs:
+                        raise TypeError(f"{class_name} accepts either data or field values, not both")
+                    if kwargs:
+                        unknown = sorted(set(kwargs) - set(dtype.names))
+                        if unknown:
+                            names = ", ".join(unknown)
+                            raise TypeError(f"{class_name} got unknown field(s): {names}")
+                        field_values = {}
+                        lengths = []
+                        for fname, value in kwargs.items():
+                            field_dtype = dtype.fields[fname][0]
+                            if field_dtype.shape == ():
+                                value_arr = np.asarray(value, dtype=field_dtype)
+                                if value_arr.shape != ():
+                                    lengths.append(value_arr.shape[0])
+                            else:
+                                value_arr = np.asarray(value, dtype=field_dtype.base)
+                                if value_arr.shape == field_dtype.shape:
+                                    pass
+                                elif value_arr.shape[1:] == field_dtype.shape:
+                                    lengths.append(value_arr.shape[0])
+                                else:
+                                    raise ValueError(
+                                        f"Field {fname} expects shape {field_dtype.shape} or "
+                                        f"(n, {', '.join(str(s) for s in field_dtype.shape)}), "
+                                        f"got {value_arr.shape}"
+                                    )
+                            field_values[fname] = value_arr
+                        if lengths and len(set(lengths)) != 1:
+                            raise ValueError(f"{class_name} field values have inconsistent lengths: {lengths}")
+                        n = lengths[0] if lengths else 1
+                        arr = np.zeros(n, dtype=dtype)
+                        for fname, value_arr in field_values.items():
+                            arr[fname] = value_arr
+                    elif data is None:
+                        arr = np.zeros(0, dtype=dtype)
+                    elif hasattr(data, "_data") and getattr(data, "_data", None) is not None:
+                        arr = np.asarray(data._data, dtype=dtype)
+                    elif isinstance(data, (list, tuple)) and data and hasattr(data[0], "_data"):
+                        arr = np.asarray([item._data for item in data], dtype=dtype)
+                    else:
+                        arr = np.asarray(data, dtype=dtype)
+                    if arr.shape == ():
+                        arr = arr.reshape(1)
+                    if copy:
+                        arr = np.array(arr, dtype=dtype, copy=True)
+                    object.__setattr__(self, "_data", arr)
+
+                @classmethod
+                def _from_data(cls, data, copy=False):
+                    return cls(data, copy=copy)
+
+                @staticmethod
+                def zeros(n):
+                    return array_cls(np.zeros(n, dtype=dtype))
+
+                def __len__(self):
+                    return len(self._data)
+
+                def __iter__(self):
+                    for idx in range(len(self)):
+                        yield self[idx]
+
+                def __array__(self, dtype=None, copy=None):
+                    arr = np.asarray(self._data, dtype=dtype)
+                    if copy:
+                        arr = np.array(arr, copy=True)
+                    return arr
+
+                def __getitem__(self, key):
+                    if isinstance(key, str):
+                        return self._data[key]
+                    if isinstance(key, (int, np.integer)):
+                        idx = int(key)
+                        if idx < 0:
+                            idx += len(self._data)
+                        return struct_cls._from_data(self._data[idx:idx + 1].reshape(()))
+                    value = self._data[key]
+                    if getattr(value, "dtype", None) == dtype:
+                        if getattr(value, "shape", ()) == ():
+                            return struct_cls._from_data(value)
+                        return array_cls(value)
+                    return value
+
+                def __setitem__(self, key, value):
+                    if hasattr(value, "_data") and getattr(value, "_data", None) is not None:
+                        self._data[key] = value._data
+                    else:
+                        self._data[key] = value
+
+                def __repr__(self):
+                    return f"<Array {spec.name}[{len(self)}]>"
+
+                namespace = {
+                    "__slots__": slots,
+                    "__init__": __init__,
+                    "__repr__": __repr__,
+                    "__len__": __len__,
+                    "__iter__": __iter__,
+                    "__array__": __array__,
+                    "__getitem__": __getitem__,
+                    "__setitem__": __setitem__,
+                    "_from_data": _from_data,
+                    "zeros": zeros,
+                    "dtype": dtype,
+                    "__doc__": f"Python wrapper for arrays of C struct {spec.name}.",
+                    "array": property(lambda self: self._data),
+                    "shape": property(lambda self: self._data.shape),
+                    "ndim": property(lambda self: self._data.ndim),
+                    "size": property(lambda self: self._data.size),
+                    "ctypes": property(lambda self: self._data.ctypes),
+                }
+
+                for fname in dtype.names:
+                    namespace[fname] = property(lambda self, fname=fname: self._data[fname])
+
+                array_cls = type(class_name, (), namespace)
+                return array_cls
+
             struct_cls = make_struct_class(sspec, dtype)
+            struct_array_cls = make_struct_array_class(sspec, dtype, struct_cls)
             self._struct_dtypes[sname] = dtype
             self._struct_classes[sname] = struct_cls
+            self._struct_array_classes[sname] = struct_array_cls
             setattr(self, sname, struct_cls)
+            setattr(self, f"{sname}Array", struct_array_cls)
+
+    def _wrap_struct_output(self, value, struct_name: str):
+        struct_cls = self._struct_classes[struct_name]
+        struct_array_cls = self._struct_array_classes[struct_name]
+        if isinstance(value, (struct_cls, struct_array_cls)):
+            return value
+        arr = np.asarray(value, dtype=self._struct_dtypes[struct_name])
+        if arr.shape == ():
+            return struct_cls._from_data(arr)
+        return struct_array_cls._from_data(arr)
 
     def _make_wrapper_from_spec(self, fspec: FuncSpec):
         struct_names = set(self._struct_specs.keys())
@@ -751,6 +910,7 @@ class CModule:
             "base_type_from_ctype": base_type_from_ctype,
             "_struct_classes": self._struct_classes,
             "_struct_dtypes": self._struct_dtypes,
+            "_struct_array_classes": self._struct_array_classes,
         }
         filename = f"<cmodule:{self._c_path.name}:{fspec.name}>"
         linecache.cache[filename] = (
@@ -924,6 +1084,7 @@ class CModule:
         output_vars: list[str] = []
         output_names: list[str] = []
         output_conditions: dict[str, str] = {}
+        struct_output_types: dict[str, str] = {}
         pointer_scalar_outputs: list[tuple[str, str]] = []
         struct_scalar_outputs: list[tuple[str, str, str]] = []
         pre_lines: list[str] = []
@@ -1051,8 +1212,18 @@ class CModule:
                     ]
                 out_lines += [
                     "    else:",
-                    f"        arr_{a.name} = np.ascontiguousarray({a.name}, dtype=base_dtype)",
                 ]
+                if a.base_type in struct_names:
+                    out_lines += [
+                        f"        if hasattr({a.name}, '_data') and getattr({a.name}, '_data', None) is not None and getattr({a.name}, '_data').dtype == base_dtype:",
+                        f"            arr_{a.name} = {a.name}._data",
+                        "        else:",
+                        f"            arr_{a.name} = np.ascontiguousarray({a.name}, dtype=base_dtype)",
+                    ]
+                else:
+                    out_lines += [
+                        f"        arr_{a.name} = np.ascontiguousarray({a.name}, dtype=base_dtype)",
+                    ]
                 if shape_expr is not None:
                     expr_py = _expr_py(shape_expr)
                     out_lines += [
@@ -1067,6 +1238,7 @@ class CModule:
                 output_names.append(a.name)
                 if a.base_type in struct_names:
                     output_conditions[a.name] = f"_ret_{a.name}"
+                    struct_output_types[a.name] = a.base_type
                 if a.name in pointer_scalar_names:
                     pointer_scalar_outputs.append((a.name, f"arr_{a.name}"))
                 else:
@@ -1172,6 +1344,11 @@ class CModule:
                 elif out_name in post_shape_contract_map:
                     expr_py = _expr_py(post_shape_contract_map[out_name])
                     output_value_exprs[idx] = f"np.reshape({out_var}, tuple({expr_py}))"
+                if out_name in struct_output_types:
+                    output_value_exprs[idx] = (
+                        f"_self._wrap_struct_output({output_value_exprs[idx]}, "
+                        f"'{struct_output_types[out_name]}')"
+                    )
 
         if own_return:
             base_ret = base_type_from_ctype(fspec.return_ctype)

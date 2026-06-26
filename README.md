@@ -106,8 +106,10 @@ Rules are parsed case-insensitively; whitespace does not matter.
 - **Scalar pointer outputs**: pointers to integer-like types (e.g., `int *out_len`) are returned as plain Python integers alongside other outputs.
 - **Structs**: for `typedef struct` declarations TinyCWrap generates a Python class:
   - fields are accessible as properties backed by a NumPy structured dtype (`Name.dtype`);
+  - scalar struct outputs return `Name` objects;
+  - struct-array outputs return compact `NameArray` wrappers, with field arrays as properties (`points.x`), scalar items as `Name` objects (`points[0]`), and Python construction as `NameArray(array_like)` or `NameArray(x=..., y=...)`;
   - pointer fields paired with `len_<field>` automatically allocate NumPy arrays when you instantiate the struct with `len_field` or when you pass an array for that field;
-  - `_data` holds the underlying structured array, and `Name.zeros(n)` returns an array of that dtype.
+  - `_data` holds the underlying structured array, `Name.zeros(n)` returns a raw array of that dtype, and `NameArray.zeros(n)` returns the typed wrapper.
 - **Reloading**: inside IPython, pass `reload=True` (default) to auto-recompile before each cell if the C sources changed.
 
 ## Worked examples

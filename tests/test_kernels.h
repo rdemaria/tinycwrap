@@ -16,6 +16,8 @@ void mat_add(const double *restrict a, const double *restrict b, int n, int m, d
 void cross(const double *restrict a, const double *restrict b, double *restrict out);
 double complex_magnitude(const ComplexPair *z);
 void scale_complex(ComplexPair *z, double factor);
+void midpoint_complex(const ComplexPair *a, const ComplexPair *b, ComplexPair *out_z);
+void make_complex_pairs(ComplexPair *out_pairs);
 double kinetic_energy(const Particle *p, int len_p);
 void split_vectors(const double *restrict inp, int len_inp, double *restrict out1, double *restrict out2);
 void make_particles(double speed, Particle *out_p, int len_p);
